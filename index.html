@@ -160,15 +160,6 @@ main { display: grid; grid-template-columns: auto 1fr 330px; min-height: 0; }
 .optbar .ob-f input { width: 86px; }
 .optbar .unit { font-size: 12px; font-family: var(--font-data); }
 .optbar .ob-angles { display: inline-flex; gap: 3px; }
-/* saved load values: chips, lit when the tool's values are theirs */
-.optbar .ob-presets { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
-.optbar .ob-chip { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); font-size: 12px; }
-.optbar .ob-chip button { border: 0; background: none; color: inherit; font: inherit; cursor: pointer; padding: 2px 4px 2px 9px; white-space: nowrap; }
-.optbar .ob-chip button.x { padding: 2px 7px 2px 2px; color: var(--muted); }
-.optbar .ob-chip button.x:hover { color: var(--danger); }
-.optbar .ob-chip:hover { border-color: var(--accent); }
-.optbar .ob-chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-.optbar #ob-pname { width: 110px; }
 .optbar .ob-seg { display: inline-flex; }
 .optbar .ob-seg .btn:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
 .optbar .ob-seg .btn:last-child { border-top-left-radius: 0; border-bottom-left-radius: 0; margin-left: -1px; }
@@ -735,6 +726,38 @@ html, body { margin: 0; }
   footer { padding-bottom: max(4px, env(safe-area-inset-bottom, 0px)); }
 }
 
+/* the number pad (a finger in a number box of the tool's settings bar): docked at the bottom, the page above it */
+#numpad { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; background: var(--panel); border-top: 1px solid var(--line);
+  padding: 6px max(8px, env(safe-area-inset-left, 0px)) max(8px, env(safe-area-inset-bottom, 0px)); box-shadow: 0 -4px 14px rgba(0, 0, 0, .12); }
+#numpad .np-recent { display: none; gap: 6px; overflow-x: auto; padding-bottom: 6px; scrollbar-width: none; max-width: 520px; margin: 0 auto; }
+#numpad.has-recent .np-recent { display: flex; }
+#numpad .np-recent button { flex: none; min-height: 34px; padding: 0 14px; border-radius: 17px; border: 1px solid var(--line);
+  background: var(--accent-soft); color: var(--ink); font: 500 15px 'IBM Plex Mono', ui-monospace, monospace; }
+#numpad .np-keys { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; max-width: 520px; margin: 0 auto; }
+#numpad .np-keys button { min-height: 46px; border-radius: 8px; border: 1px solid var(--line); background: var(--sheet, var(--panel)); color: var(--ink);
+  font: 500 20px 'IBM Plex Sans', system-ui, sans-serif; touch-action: manipulation; -webkit-user-select: none; user-select: none; }
+#numpad .np-keys button:active { background: var(--accent-soft); }
+#numpad .np-keys button[data-np="next"], #numpad .np-keys button[data-np="abc"], #numpad .np-keys button[data-np="hide"] { font-size: 15px; color: var(--muted); }
+#numpad .np-keys button:disabled { opacity: .35; }
+#numpad .np-wide { grid-column: span 2; }
+#numpad .np-colon { visibility: hidden; }
+#numpad.colon .np-colon { visibility: visible; }
+#numpad .np-keys .np-enter { background: var(--accent); border-color: var(--accent); color: #fff; font-size: 17px; }
+.app.numpad-on { padding-bottom: var(--numpad-h, 0px); }
+/* the value the pad's first key will replace */
+#optbar input.np-all { background: var(--accent-soft); }
+/* a phone turned sideways: the pad stands at the right, and the page (its settings bar and drawing) beside it
+   keeps its height */
+@media (max-height: 500px) and (orientation: landscape) and (min-width: 561px) {
+  #numpad { left: auto; top: 0; width: min(330px, 46vw); border-top: 0; border-left: 1px solid var(--line); display: flex; flex-direction: column; justify-content: flex-end;
+    padding: max(6px, env(safe-area-inset-top, 0px)) max(8px, env(safe-area-inset-right, 0px)) max(6px, env(safe-area-inset-bottom, 0px)) 8px; }
+  #numpad .np-keys { width: 100%; gap: 5px; }
+  #numpad .np-keys button { min-height: 40px; font-size: 18px; }
+  .app.numpad-on { padding-bottom: 0; padding-right: min(330px, 46vw); }
+}
+/* the Delete button of a touch screen (Delete tool), in Done's place */
+.touch-del { min-height: 48px; padding: 0 22px; border-color: var(--danger); color: var(--danger); touch-action: none; -webkit-user-select: none; user-select: none; }
+
 </style>
 </head>
 <body>
@@ -873,6 +896,7 @@ html, body { margin: 0; }
         <button class="btn icon" id="btn-redo" title="Redo (Ctrl+Y)" aria-label="Redo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg></button>
       </div>
       <button class="btn touch-esc" id="touch-esc" title="End what is being drawn or the command under way (as Esc does)" hidden>Done</button>
+      <button class="btn touch-esc touch-del" id="touch-del" title="Delete what the cross-hair is on (one finger aims, another taps here), or what was selected" hidden>Delete</button>
     </div>
 
     <aside>
@@ -7455,8 +7479,12 @@ let touchFinger = null;       // where that finger is
 let touchPinch = null;        // two fingers: { cam, c: centre at the start, d: their distance, w: model point under c }
 let touchIdle = false;        // after a pinch: ignore the fingers still down until all are lifted
 let touchSeen = false;        // a finger has been used (the Done button is offered from then on)
-// tools a finger aims with; the others are dragged, as with a mouse
-const touchAims = () => !!(st.xcmd || st.paste) || (!st.gridPick && !['select', 'box', 'dist'].includes(st.tool));
+// tools a finger aims with; the others (Select, the distributed load) are dragged, as with a mouse. Box select aims
+// too: its box runs from where the cross-hair first appears to where it is now (touchBoxSel). The grid-origin pick
+// aims as well (touchGridLift). (Not in the Influence view, where Box select picks the line's subject and a drag pans.)
+const touchAims = () => !!(st.xcmd || st.paste || st.gridPick)
+  || (st.tool === 'box' && st.view !== 'influence')
+  || !['select', 'box', 'dist'].includes(st.tool);
 // A quick tap places exactly where it lands, with no cross-hair. The moment the finger starts to drag, the point
 // it aims at jumps TOUCH_LIFT above it and stays there for that touch, so the fingertip does not cover what is
 // being placed. (The bottom strip of the drawing is reached by tapping, or by panning it up with two fingers.)
@@ -7474,6 +7502,7 @@ function touchHold(e, p) {
   touchHoldOff();
   if (st.pending != null || st.xcmd || st.paste || st.gridPick || st.print) return;
   if (st.tool === 'dist') return; // a distributed load is dragged along its member: a finger resting there first is about to do that
+  if (st.tool === 'delete' && (touchBoxArmed || touchBoxDel)) return; // the same for a box about to be drawn
   touchHoldT = setTimeout(() => {
     touchHoldT = 0;
     if (touchPts.size !== 1 || touchLift || touchPinch || touchIdle) return;
@@ -7510,9 +7539,15 @@ function touchProbeTo(p) {
 // A short buzz when the point a dragging finger aims at catches something: a node, a point of a load, a member
 // as the point first comes onto it, and, along a member, each place where it crosses a grid line (with snap
 // on). Grid points off a member do not buzz.
-let touchTickKey = '';
+let touchTickKey = '', touchDelWas = null;
 function touchTick() {
-  if (!touchAim || !touchLift || st.tool === 'delete') { touchTickKey = ''; return; }
+  // the Delete tool: a buzz as the cross-hair comes onto something it would delete (shown in red)
+  if (st.tool === 'delete') {
+    const h = touchAim && touchLift ? st.hoverDel : null;
+    if (h && !sameTarget(h, touchDelWas)) touchBuzz(15);
+    touchDelWas = h; touchTickKey = ''; return;
+  }
+  if (!touchAim || !touchLift) { touchTickKey = ''; return; }
   const at = touchAt(); // where the cross-hair is: the point the tool will use
   if (!at) { touchTickKey = ''; return; }
   const [px, py] = toScreen(at[0], at[1]), n = hitNode(px, py), lp = !n && st.view === 'model' && hitLoadPoint(px, py, 9 * pickScale), hm = !n && !lp && hitMember(px, py);
@@ -7530,6 +7565,9 @@ function touchTick() {
 // the cross-hair is drawn
 function touchAt() {
   if (!touchAim || !st.mouse) return null;
+  const G = st.gridPick && st.gridPick.hover; // the grid-origin pick: the point it would take (a node, a grid point…)
+  if (G) return [G.x, G.y];
+  if (st.tool === 'box' && !st.xcmd && !st.paste) return toWorld(...st.mouse); // Box select: the bare point
   return (st.tool !== 'delete' && (st.xcmd && !st.xcmd.selecting ? st.xcmd.aim : st.aim)) || toWorld(...st.mouse); // Delete points at the bare point
 }
 function touchLifted(p) {
@@ -7562,7 +7600,7 @@ function touchDown(e) {
   touchPts.set(e.pointerId, p);
   if (touchMenuShut) { touchMenuShut = false; touchIdle = true; e.stopPropagation(); e.preventDefault(); return; } // it closed a menu: nothing more
   if (touchPts.size === 1 && !touchIdle) {
-    touchFrom = p; touchLift = 0;
+    touchFrom = p; touchLift = 0; touchLiftUsed = false;
     touchSelWas = { nodes: new Set(st.sel.nodes), members: new Set(st.sel.members), dims: new Set(st.sel.dims) };
     touchHold(e, p);
     touchProbing = false;
@@ -7603,7 +7641,11 @@ function touchMove(e) {
     st.cam = { x: touchPinch.w[0] - (c[0] - w / 2) / z, y: touchPinch.w[1] + (c[1] - h / 2) / z, z };
     render();
   } else if (touchIdle) { e.stopPropagation(); e.preventDefault(); }
-  else if (touchAim) { e.stopPropagation(); e.preventDefault(); touchFinger = p; touchAim = touchLifted(p); touchSend('pointermove', ...touchAim); touchTick(); toolsFade(touchLift ? touchAim : null); }
+  else if (touchAim) {
+    e.stopPropagation(); e.preventDefault(); touchFinger = p; touchAim = touchLifted(p); touchSend('pointermove', ...touchAim); touchTick(); toolsFade(touchLift ? touchAim : null);
+    if (touchBoxArmed && touchLift && st.mouse) { touchDelFrom = [...st.mouse]; touchBoxDelStart(true); } // the Delete button held first
+    touchBoxSel(); touchGridTurn();
+  }
   else if (touchProbing && st.probe && !st.drag) { e.stopPropagation(); e.preventDefault(); touchProbeTo(p); }
 }
 function touchUp(e) {
@@ -7619,7 +7661,17 @@ function touchUp(e) {
   }
   if (!touchAim) return;
   e.stopPropagation(); e.preventDefault();
-  touchAim = null;
+  if (touchBoxDel) { // lifted while the box grew: what is in it goes; with the button still held, the next drag draws another
+    touchBoxDelEnd(); touchAim = null; touchDelWas = null; touchSend('pointerleave', 0, 0);
+    if (touchDelAt) touchBoxArmed = true;
+    return;
+  }
+  touchAim = null; touchDelWas = null;
+  if (st.drag && st.drag.touchBox) { // Box select: the box from the cross-hair selects
+    const a = touchLifted(p); touchSend('pointerup', ...a); touchSend('pointerleave', 0, 0); return;
+  }
+  if (st.gridPick && touchGridLift(e, p)) return;
+  if (touchLiftUsed) { touchLiftUsed = false; touchSend('pointerleave', 0, 0); return; } // the Delete button did the deleting: lifting deletes nothing more
   // placed at the point aimed at, while that point is on the drawing: the finger itself may be below it, over
   // the panel's tabs or the footer
   const { w, h } = viewSize(), a = touchLifted(p), inside = a[0] >= 0 && a[1] >= 0 && a[0] <= w && a[1] <= h;
@@ -7662,7 +7714,7 @@ function drawTouchAim(g, C) {
   const at = touchAt(), [x, y] = toScreen(at[0], at[1]);
   const arm = (dx, dy) => g.appendChild(el('line', { x1: x + dx * 9, y1: y + dy * 9, x2: x + dx * 34, y2: y + dy * 34, stroke: C.accent, 'stroke-width': 1.5, opacity: 0.85, 'pointer-events': 'none' }));
   arm(1, 0); arm(-1, 0); arm(0, 1); arm(0, -1);
-  if (!del && !(st.tool === 'member' && st.pending) && !st.xcmd) liveLabel(g, x - 60, y - 24, [`x ${fmt(toU('len', at[0]), 2)}  y ${fmt(toU('len', at[1]), 2)} ${unit('len')}`], C);
+  if (!del && !(st.tool === 'member' && st.pending) && !st.xcmd && !(st.tool === 'box' && !st.gridPick) && !(st.gridPick && st.gridPick.down)) liveLabel(g, x - 60, y - 24, [`x ${fmt(toU('len', at[0]), 2)}  y ${fmt(toU('len', at[1]), 2)} ${unit('len')}`], C);
 }
 
 // Done: what Esc does at a keyboard (ends a chain of members, a command, a paste), for a screen without one.
@@ -7670,11 +7722,145 @@ function drawTouchAim(g, C) {
 function renderTouchUi() {
   const b = document.getElementById('touch-esc');
   if (b) b.hidden = !(touchSeen && !st.print && (st.pending != null || st.xcmd || st.paste || st.gridPick || st.typed));
+  // Delete: with the Delete tool on a touch screen. One finger aims (what the cross-hair is on shows in red, with a
+  // buzz), another taps here to delete it; the aiming finger can go on to the next thing, and lifting it then
+  // deletes nothing more. (A quick tap on the drawing still deletes what it lands on, as before.) Held down while
+  // the finger moves, it grows a box (see touchBoxDelStart), and what is in it is deleted on release. Pressed with no finger aiming, it
+  // deletes the selection, if there is one.
+  const d = document.getElementById('touch-del');
+  if (d) {
+    d.hidden = !(touchSeen && !st.print && st.tool === 'delete');
+    if (touchBoxDel && !(st.drag && st.drag.del)) touchBoxDel = false; // the box was dropped (two fingers, another tool)
+    if (d.hidden) touchBoxArmed = false;
+  }
 }
-document.getElementById('touch-esc').addEventListener('click', () => {
+// Done pressed while a finger still aims (the next member's end, say): what it was about to place is dropped, not
+// added, and the chain ends; the finger's lift then places nothing.
+let touchEscAt = 0;
+function touchDone() {
+  if (touchAim) touchLiftUsed = true;
+  if (st.gridPick && st.gridPick.down) { st.gridPick.angle = null; finishGridPick(); render(); return; } // the grid's point chosen: Done keeps it straight
   window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
   render();
+}
+const touchEscBtn = document.getElementById('touch-esc');
+touchEscBtn.addEventListener('pointerdown', e => { e.preventDefault(); touchEscAt = Date.now(); touchDone(); });
+touchEscBtn.addEventListener('click', () => { if (Date.now() - touchEscAt > 700) touchDone(); }); // (the keyboard's Enter on it)
+
+// Box select with a finger: once the finger drags (its cross-hair appears above it), a box runs from that first
+// point of the cross-hair to where it is now, as a mouse drags one; the lift selects what it takes (left to right:
+// what is wholly inside; right to left: what it touches). A quick tap selects what it lands on, or clears.
+function touchBoxSel() {
+  if (st.tool !== 'box' || st.xcmd || st.paste || st.gridPick || !touchLift || !st.mouse || (st.drag && st.drag.touchBox)) return;
+  const [x, y] = st.mouse;
+  st.drag = { kind: 'box', px: x, py: y, x2: x, y2: y, add: false, moved: false, touchBox: true };
+  render();
+}
+
+// Move the grid to a point, with a finger. First the point: aim the cross-hair at it (a node, a point on a member,
+// the origin, a grid point) and lift. The grid then shows through it, and a second drag turns it: the line from the
+// point to the cross-hair is the grid's new direction, catching every 15° (with a buzz) when within 3° of one, and
+// the lift sets it. A tap instead, or Done, keeps the grid straight through the point.
+let touchGridStep = null;
+function touchGridTurn() {
+  const G = st.gridPick;
+  if (!G || !G.down || G.angle == null) return;
+  const step = Math.PI / 12, k = Math.round(G.angle / step), near = Math.abs(G.angle - k * step) < 3 * Math.PI / 180;
+  if (near) G.angle = k * step;
+  const key = near ? k : null;
+  if (key !== null && key !== touchGridStep) touchBuzz(12);
+  touchGridStep = key;
+  render();
+}
+function touchGridLift(e, p) {
+  const G = st.gridPick;
+  if (!G) return false;
+  const { w, h } = viewSize(), a = touchLifted(p), inside = a[0] >= 0 && a[1] >= 0 && a[0] <= w && a[1] <= h;
+  touchGridStep = null;
+  if (!G.down) { // the first lift: the point (the grid previews through it; the next drag turns it)
+    if (e.type === 'pointerup' && inside) {
+      touchSend('pointermove', ...a); touchSend('pointerdown', ...a);
+      flash('Now drag to turn the grid along a line from this point (it catches every 15°), or tap to keep it straight.');
+    }
+    touchSend('pointerleave', 0, 0); return true;
+  }
+  // the second: a drag sets the turn; a tap keeps the grid straight
+  if (!touchLift) G.angle = null;
+  finishGridPick(); render();
+  touchSend('pointerleave', 0, 0); return true;
+}
+let touchLiftUsed = false, touchDelAt = 0; // the button deleted something during this touch; when (a click after a press is the same press)
+function touchDeleteNow() {
+  const t = touchAim && touchLift && st.hoverDel;
+  if (!t || st.tool !== 'delete') return;
+  commit(() => deleteTargetNow(t));
+  touchLiftUsed = true; touchBuzz(30);
+  const h = st.mouse && deleteTarget(...st.mouse); // what the cross-hair is on now
+  st.hoverDel = h; st.hoverLoad = h && h.kind === 'load' ? h.ld : null; touchDelWas = h;
+  render();
+}
+// Box delete: the button pressed, at once (with a buzz). Pressed while a finger aims, a box grows from where the
+// cross-hair was then; pressed first, it waits for a finger, and the box starts where that finger's cross-hair first
+// appears as it drags. The box runs to where the cross-hair is now (left to right: what is wholly inside; right to
+// left: what it touches, as box select), and what it would delete shows red. Letting go of the button (or lifting
+// the aiming finger) deletes it; if the box never grew, that was a tap, and what the cross-hair was on goes instead.
+// While the button stays held, each new drag draws another box.
+let touchBoxDel = false, touchBoxArmed = false, touchDelFrom = null;
+function touchBoxDelStart(armed) {
+  if (st.tool !== 'delete') return;
+  if (!armed && !(touchAim && touchLift && touchDelFrom)) { touchBoxArmed = true; touchBuzz(25); return; } // no finger aiming yet: wait for one
+  touchBoxArmed = false;
+  if (!touchAim || !touchLift || !touchDelFrom || !st.mouse || touchPinch || touchIdle) return;
+  const [x, y] = st.mouse, [px, py] = touchDelFrom;
+  st.drag = { kind: 'box', px, py, x2: x, y2: y, moved: Math.hypot(x - px, y - py) >= 4, del: true, tap: armed ? null : st.hoverDel };
+  if (st.drag.moved) st.drag.sets = boxDeletes(st.drag);
+  touchBoxDel = true; st.hoverDel = null; st.hoverLoad = null; touchDelWas = null;
+  if (!armed) touchBuzz(25);
+  render();
+}
+function touchBoxDelEnd() {
+  const d = st.drag;
+  touchBoxDel = false; touchLiftUsed = true; // (the aiming finger's lift deletes nothing more)
+  if (d && d.del) {
+    st.drag = null;
+    const before = st.undo.length;
+    if (d.moved) deleteBox(d);
+    else if (d.tap) commit(() => deleteTargetNow(d.tap)); // the box never grew: a tap
+    if (st.undo.length !== before) touchBuzz(30);
+  }
+  const h = st.mouse && touchAim && deleteTarget(...st.mouse);
+  st.hoverDel = h || null; st.hoverLoad = h && h.kind === 'load' ? h.ld : null; touchDelWas = h || null;
+  renderPanel(); render();
+}
+// The button is handled on press and release (not click): a second finger's tap may not make a click while the
+// first is still on the screen.
+const touchDelBtn = document.getElementById('touch-del');
+// Pressed with no finger aiming and something selected (made before switching to the Delete tool): the selection is
+// deleted, as the Delete key does.
+function touchDeleteSelection() {
+  const n = st.sel.nodes.size, mbs = st.sel.members.size, dms = st.sel.dims.size;
+  if (!n && !mbs && !dms) return false;
+  deleteSelection(); clearSel(); touchBuzz(30);
+  const words = [[mbs, 'member'], [n, 'node'], [dms, 'dimension line']].filter(([k]) => k).map(([k, w]) => `${k} ${w}${k === 1 ? '' : 's'}`);
+  flash(`Deleted the selection: ${words.join(', ')}. Undo brings ${n + mbs + dms === 1 ? 'it' : 'them'} back.`);
+  renderPanel(); render();
+  return true;
+}
+touchDelBtn.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  if (!(touchAim && touchLift) && touchDeleteSelection()) { touchDelAt = 0; return; } // (its release then does nothing)
+  touchDelAt = Date.now();
+  try { touchDelBtn.setPointerCapture(e.pointerId); } catch (err) { /* not a live pointer */ }
+  touchDelFrom = touchAim && touchLift && st.mouse ? [...st.mouse] : null; // where the box starts
+  touchBoxDelStart(false);
 });
+touchDelBtn.addEventListener('pointerup', () => {
+  if (!touchDelAt) return;
+  touchDelAt = 0;
+  if (touchBoxDel) touchBoxDelEnd(); // let go of: the box's contents go (or, not grown, what the cross-hair was on)
+  else touchBoxArmed = false; // pressed, but no box was drawn
+});
+touchDelBtn.addEventListener('pointercancel', () => { touchDelAt = 0; touchBoxArmed = false; if (touchBoxDel) { touchBoxDel = false; if (st.drag && st.drag.del) st.drag = null; render(); } });
 
 /* ---------------- the phone layout: more room for the drawing ---------------- */
 // On a phone the panel is folded down to its row of tabs, and the drawing gets its room: a tab opens it, the
@@ -7758,6 +7944,156 @@ function menuFit(m) {
 const fitMenus = [...document.querySelectorAll('header .menu, .menu.right')];
 for (const m of fitMenus) new MutationObserver(() => menuFit(m)).observe(m, { attributes: true, attributeFilter: ['hidden'], childList: true });
 window.addEventListener('resize', () => fitMenus.forEach(menuFit));
+
+// ---------- the number pad ----------
+// On a touch screen the phone's own keyboard covers half the screen, and its number keyboard often has no minus
+// sign. So a number box in the tool's settings bar (Length, Angle, x, y, Δx, Δy, From, To, the load values),
+// tapped with a finger, opens this pad instead: the digits, minus, point, Backspace, Next (the next box in the bar)
+// and Enter (as the Enter key: it places the member, the node, the move…), a ':' for a slope in an Angle box, and a
+// row of the values used last for that kind of box (lengths, angles, forces…), kept in this browser. ABC brings the
+// phone's keyboard back for that box (a load value can be a formula, such as 1.2*D). A mouse or a pen gets the box
+// as before.
+const NUMPAD_KEY = 'frame-studio-recent-numbers';
+const numpadEl = document.createElement('div');
+numpadEl.id = 'numpad'; numpadEl.hidden = true; numpadEl.setAttribute('role', 'group'); numpadEl.setAttribute('aria-label', 'Number pad');
+numpadEl.innerHTML = `<div class="np-recent" aria-label="Values used last"></div><div class="np-keys">
+  ${['7', '8', '9'].map(k => `<button type="button" data-np="${k}">${k}</button>`).join('')}<button type="button" data-np="back" aria-label="Backspace">⌫</button><button type="button" data-np="hide" title="Hide the number pad">Hide</button>
+  ${['4', '5', '6'].map(k => `<button type="button" data-np="${k}">${k}</button>`).join('')}<button type="button" data-np="-" aria-label="Minus">−</button><button type="button" data-np="abc" title="The phone's keyboard, for this box">ABC</button>
+  ${['1', '2', '3'].map(k => `<button type="button" data-np="${k}">${k}</button>`).join('')}<button type="button" data-np=".">.</button><button type="button" data-np="next">Next</button>
+  <button type="button" data-np="0" class="np-wide">0</button><button type="button" data-np=":" class="np-colon" title="A slope, such as 4:12">:</button><button type="button" data-np="enter" class="np-wide np-enter">Enter</button>
+</div>`;
+document.body.appendChild(numpadEl);
+let numpadTouch = false, numpadFor = null; // the last press was a finger; the box the pad is typing into
+let numpadCaret = null; // where the pad's next key goes in that box (null: at the end)
+let numpadAll = false, numpadSince = 0, numpadOrig = ''; // (numpadOrig: the box's value when the pad came to it) // the box's value is all selected (the first key replaces it, as on a calculator); when the pad came to it
+// the bar's boxes the pad serves (not one switched to the phone's keyboard)
+const numpadBox = el => !!el && el.tagName === 'INPUT' && !!el.closest('#optbar') && (el.type === 'text' || el.type === 'number')
+  && !el.dataset.npKeyboard;
+// what kind of number a box takes, for its row of values used last
+const numpadKind = el => (el.dataset.mt === 'ang' || el.dataset.xt === 'ang' || el.dataset.q === 'deg') ? 'ang'
+  : el.hasAttribute('data-copies') ? null : el.dataset.q || 'len';
+const numpadRecent = () => { try { const o = JSON.parse(localStorage.getItem(NUMPAD_KEY)); if (o && typeof o === 'object') return o; } catch (e) { /* storage unavailable */ } return {}; };
+function numpadRemember(el) {
+  const kind = numpadKind(el), v = String(el.value).trim();
+  if (!kind || !v || !/^[-+]?(\d+\.?\d*|\.\d+)([:/<][-+]?(\d+\.?\d*|\.\d+))?$/.test(v)) return; // numbers (and slopes) only
+  const o = numpadRecent(); o[kind] = [v, ...(o[kind] || []).filter(x => x !== v)].slice(0, 6);
+  try { localStorage.setItem(NUMPAD_KEY, JSON.stringify(o)); } catch (e) { /* storage unavailable */ }
+}
+// The boxes switch the phone's keyboard off while a finger is in use, and back on for a mouse: inputmode none, and
+// read-only as well, since inputmode is only a hint and a phone may raise its keyboard anyway (the pad changes the
+// value itself, so read-only does not stop it).
+function numpadPrepare() {
+  for (const el of document.querySelectorAll('#optbar input')) {
+    if (!numpadBox(el)) { if (el.dataset.npRo) { el.readOnly = false; delete el.dataset.npRo; } continue; }
+    if (!('npMode' in el.dataset)) el.dataset.npMode = el.getAttribute('inputmode') || '';
+    if (numpadTouch) { el.setAttribute('inputmode', 'none'); if (!el.readOnly) { el.readOnly = true; el.dataset.npRo = '1'; } }
+    else {
+      if (el.dataset.npMode) el.setAttribute('inputmode', el.dataset.npMode); else el.removeAttribute('inputmode');
+      if (el.dataset.npRo) { el.readOnly = false; delete el.dataset.npRo; }
+    }
+  }
+}
+// the box's value is to be replaced by the first key: shaded (not selected, which would bring up the phone's
+// Cut / Copy bar)
+function numpadSetAll(on) { numpadAll = on; if (numpadFor) numpadFor.classList.toggle('np-all', on); }
+document.addEventListener('pointerdown', e => {
+  if (numpadEl.contains(e.target)) return;
+  const touch = e.pointerType === 'touch';
+  if (touch !== numpadTouch) { numpadTouch = touch; numpadPrepare(); }
+}, true);
+new MutationObserver(numpadPrepare).observe(document.getElementById('optbar'), { childList: true, subtree: true });
+const numpadBoxes = () => [...document.querySelectorAll('#optbar input')].filter(el => numpadBox(el) && el.offsetParent);
+function numpadShow(el) {
+  if (el !== numpadFor) { // a new box: the first key replaces its value
+    if (numpadFor) { numpadCommit(numpadFor); numpadFor.classList.remove('np-all'); }
+    numpadCaret = null; numpadSince = Date.now(); numpadOrig = el.value;
+    numpadFor = el; numpadSetAll(el.value.length > 0);
+  }
+  numpadFor = el;
+  const kind = numpadKind(el), rec = (kind && numpadRecent()[kind]) || [];
+  numpadEl.querySelector('.np-recent').innerHTML = rec.map(v => `<button type="button" data-np-val="${esc(v)}">${esc(v)}</button>`).join('');
+  numpadEl.classList.toggle('has-recent', rec.length > 0);
+  numpadEl.classList.toggle('colon', el.dataset.mt === 'ang');
+  const list = numpadBoxes();
+  numpadEl.querySelector('[data-np="next"]').disabled = list.indexOf(el) >= list.length - 1;
+  const wasHidden = numpadEl.hidden;
+  numpadEl.hidden = false;
+  appEl.style.setProperty('--numpad-h', numpadEl.offsetHeight + 'px');
+  if (wasHidden) { appEl.classList.add('numpad-on'); forgetViewSize(); render(); }
+}
+// Boxes save their value on 'change', which a browser sends only for what was typed on its keyboard: the pad
+// sends it itself when it leaves a box it changed (Enter, Next, Hide, a press elsewhere)
+function numpadCommit(el) {
+  if (!el || el.value === numpadOrig || !document.body.contains(el)) return;
+  numpadOrig = el.value;
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+function numpadHide() {
+  numpadCommit(numpadFor);
+  if (numpadFor) numpadFor.classList.remove('np-all');
+  numpadFor = null;
+  if (numpadEl.hidden) return;
+  numpadEl.hidden = true; appEl.classList.remove('numpad-on'); forgetViewSize(); render();
+}
+document.addEventListener('focusin', e => {
+  if (numpadTouch && numpadBox(e.target) && e.target.getAttribute('inputmode') === 'none') numpadShow(e.target);
+  else if (!numpadEl.contains(e.target)) numpadHide();
+});
+document.addEventListener('focusout', e => {
+  const t = e.target;
+  if (t.dataset && t.dataset.npKeyboard) setTimeout(() => { if (document.activeElement !== t) { delete t.dataset.npKeyboard; numpadPrepare(); } }, 0); // back to the pad next time
+});
+// The pad stays while its box is in use: a tap on a phone can take the focus from the box before the key is
+// pressed, so losing the focus does not close it. A press anywhere else does (the drawing, the panel, another
+// control), and so do ⌄, and Enter when the box is done (a load value).
+document.addEventListener('pointerdown', e => {
+  if (!numpadEl.hidden && !numpadEl.contains(e.target) && !numpadBox(e.target)) numpadHide();
+}, true);
+// a tap inside the box moves the caret there, for the pad too
+document.addEventListener('click', e => {
+  if (e.target !== numpadFor || Date.now() - numpadSince < 600) return; // (not the tap that opened it)
+  setTimeout(() => { numpadSetAll(false); try { numpadCaret = e.target.selectionStart; } catch (err) { /* a number box */ } }, 0);
+}, true);
+// a key that takes the focus hands it straight back to the box
+numpadEl.addEventListener('focusin', () => { if (numpadFor && document.body.contains(numpadFor)) numpadFor.focus({ preventScroll: true }); });
+// the keys: pressed without taking the focus from the box
+numpadEl.addEventListener('pointerdown', e => { if (e.target.closest('button')) e.preventDefault(); });
+numpadEl.addEventListener('mousedown', e => { if (e.target.closest('button')) e.preventDefault(); });
+numpadEl.addEventListener('click', e => {
+  const b = e.target.closest('button'), el = numpadFor;
+  if (!b) return;
+  if (!el || !document.body.contains(el)) { numpadHide(); return; }
+  if (document.activeElement !== el) { // (focusing it again can select all of it: the caret goes back where it was)
+    el.focus({ preventScroll: true });
+    const at = numpadCaret != null && numpadCaret <= el.value.length ? numpadCaret : el.value.length;
+    try { el.setSelectionRange(at, at); } catch (err) { /* a number box */ }
+  }
+  const input = () => el.dispatchEvent(new Event('input', { bubbles: true }));
+  const put = text => {
+    let a = el.value.length, z = a;
+    try { if (el.selectionStart != null) { a = el.selectionStart; z = el.selectionEnd; } } catch (err) { /* a number box has no caret */ }
+    if (numpadAll) { a = 0; z = el.value.length; numpadSetAll(false); } // the first key replaces the value
+    if (text === null) { if (a === z) a = Math.max(0, a - 1); text = ''; } // Backspace
+    el.value = el.value.slice(0, a) + text + el.value.slice(z);
+    numpadCaret = a + text.length;
+    try { el.setSelectionRange(numpadCaret, numpadCaret); } catch (err) { /* a number box */ }
+    input();
+  };
+  if (b.dataset.npVal != null) { numpadSetAll(false); el.value = b.dataset.npVal; numpadCaret = el.value.length; try { el.setSelectionRange(numpadCaret, numpadCaret); } catch (err) { /* a number box */ } input(); return; }
+  const k = b.dataset.np;
+  if (k === 'back') put(null);
+  else if (k === 'hide') { numpadCommit(el); el.blur(); numpadHide(); }
+  else if (k === 'abc') { el.dataset.npKeyboard = '1'; el.classList.remove('np-all'); if (el.dataset.npRo) { el.readOnly = false; delete el.dataset.npRo; } if (el.dataset.npMode) el.setAttribute('inputmode', el.dataset.npMode); else el.removeAttribute('inputmode'); numpadHide(); el.blur(); el.focus(); }
+  else if (k === 'next') { numpadRemember(el); numpadCommit(el); const list = numpadBoxes(), i = list.indexOf(el); if (list[i + 1]) list[i + 1].focus(); }
+  else if (k === 'enter') {
+    numpadRemember(el); numpadCommit(el);
+    numpadOrig = ''; // (a member or node box is emptied for the next one)
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    const now = document.activeElement;
+    if (numpadBox(now)) numpadShow(now); // (the member and node boxes take the next one at once)
+    else numpadHide(); // (a load value is done)
+  } else put(k);
+});
 
 </script>
 <script>'use strict';
@@ -7891,7 +8227,7 @@ function render(cursorOnly = false) {
   if (full && GP && GP.down && GP.angle != null && GP.end) {
     const [ax, ay] = toScreen(GP.down.t.x, GP.down.t.y), [bx, by] = toScreen(GP.end.x, GP.end.y);
     g.appendChild(el('line', { x1: ax, y1: ay, x2: bx, y2: by, stroke: C.accent, 'stroke-width': 2, 'pointer-events': 'none' }));
-    liveLabel(g, bx, by, [`grid along ${fmt(GP.angle * 180 / Math.PI, 2)}°${GP.end.what !== 'this point' ? ` (to ${GP.end.what})` : ''}`, 'release to set · Shift: 15° steps'], C);
+    liveLabel(g, bx, by, [`grid along ${fmt(GP.angle * 180 / Math.PI, 2)}°${GP.end.what !== 'this point' ? ` (to ${GP.end.what})` : ''}`, touchAim ? 'lift to set · it catches every 15°' : 'release to set · Shift: 15° steps'], C);
   }
   // reference axes at the origin: global x and y, with arrowheads and labels (Display ▾ can hide them)
   const ro = displayOpts();
@@ -7918,7 +8254,8 @@ function render(cursorOnly = false) {
   const pinNodes = hingeNodes();
   // what the Delete tool would remove (drawn red): hd.kind is load, hinge, node, support, dim or member
   const hd = !st.fixedSize && st.tool === 'delete' ? st.hoverDel : null;
-  const delNode = id => hd && hd.kind === 'node' && hd.id === id;
+  const bd = !st.fixedSize && st.drag && st.drag.del && st.drag.moved ? st.drag.sets : null; // a box being dragged with the Delete tool
+  const delNode = id => (hd && hd.kind === 'node' && hd.id === id) || !!(bd && bd.nodes.has(id));
   const delHinge = (mbId, end) => hd && hd.kind === 'hinge' && hd.ends.some(([b, e]) => b === mbId && e === end);
   // a soft red glow behind it as well, and a "Delete …" label at the cursor, so it also shows in Black on white
   const glow = (tag, attrs) => g.appendChild(el(tag, { ...attrs, opacity: 0.22, 'pointer-events': 'none' }));
@@ -7937,7 +8274,7 @@ function render(cursorOnly = false) {
     const [ax, ay] = toScreen(a.x, a.y), [bx, by] = toScreen(b.x, b.y);
     const sel = st.sel.members.has(mb.id);
     // deleting a node also deletes its members, so they turn red with it
-    const del = hd && ((hd.kind === 'member' && hd.id === mb.id) || delNode(mb.i) || delNode(mb.j));
+    const del = (hd && hd.kind === 'member' && hd.id === mb.id) || (bd && bd.members.has(mb.id)) || delNode(mb.i) || delNode(mb.j);
     const faded = custom ? !!R && ['N', 'V', 'M', 'deformed'].some(has) : view === 'influence' ? !!st.infl : showResults && view !== 'R';
     if (del) glow('line', { x1: ax, y1: ay, x2: bx, y2: by, stroke: C.del, 'stroke-width': 12, 'stroke-linecap': 'round' });
     g.appendChild(el('line', { x1: ax, y1: ay, x2: bx, y2: by, stroke: del ? C.del : sel ? C.accent : C.ink, 'stroke-width': del || sel ? 4 : 2.4, 'stroke-linecap': 'round', opacity: faded && !del ? 0.35 : 1 }));
@@ -8243,7 +8580,7 @@ function render(cursorOnly = false) {
   }
   // selection box: left to right = window (blue, solid), right to left = crossing (green, dashed)
   if (st.drag && st.drag.kind === 'box' && st.drag.moved) {
-    const d = st.drag, crossing = d.x2 < d.px, col = crossing ? C.sup : C.accent;
+    const d = st.drag, crossing = d.x2 < d.px, col = d.del ? C.del : crossing ? C.sup : C.accent; // (red: a box delete)
     g.appendChild(el('rect', {
       x: Math.min(d.px, d.x2), y: Math.min(d.py, d.y2), width: Math.abs(d.x2 - d.px), height: Math.abs(d.y2 - d.py),
       fill: col, 'fill-opacity': 0.12, stroke: col, 'stroke-width': 1.2, 'stroke-dasharray': crossing ? '6 4' : 'none',
@@ -9192,7 +9529,6 @@ function optBarHTML(tool) {
   return `<b class="ob-name">${OPT_NAMES[tool]}</b>` + distOpts
     + fields.map(([k, l, q]) => `<label class="ob-f" for="tv-${k}">${l}${field(k, q)}<span class="unit">${isDeg(q) ? '°' : unit(q)}</span></label>`).join('') + range
     + (SUPPORT_TOOLS[tool] ? `<span class="ob-angles">${[0, 90, 180, 270].map(a => `<button class="btn small" data-angle="${a}">${a}°</button>`).join('')}</span>` : '')
-    + presetsHTML(tool)
     + (tool === 'force' ? `<label class="chk" title="Every new force is added to the force already at that node or spot (vector sum)"><input type="checkbox" data-flag="forceAdd" ${D.forceAdd ? 'checked' : ''}> Add to forces there</label>` : '')
     + `<button class="btn small" data-reset="${tool}" title="Back to the starting values">Reset</button>`
     + `<span class="ob-hint" id="ob-thint" data-base="${esc(hint)}" title="${esc(hint)}">${esc(hint)}</span>`;
@@ -9218,70 +9554,6 @@ function updateToolBar() {
 }
 // shown while the member tool or a support or load tool is in use; redrawn only when what it shows changes (the
 // tool, a unit, the load parameters or cases, the materials and sections)
-// ---------- saved load values ----------
-// Named values for a load tool, saved with the project (m.presets): { id, name, tool, values, case }. values are the
-// tool's settings (numbers, formulas, and for the distributed load its axes and shape); case, if set, is the load
-// case it goes into. A click on one in the options bar sets them all, so loading a frame by hand is one click per
-// kind of load: "D −10 → Dead", then "L −5 → Live".
-const PRESET_TOOLS = ['force', 'moment', 'dist', 'temp'];
-const PRESET_KEYS = { force: ['fx', 'fy'], moment: ['m'], dist: ['qx', 'qy', 'qx2', 'qy2'], temp: ['ttop', 'tbot'] };
-function presetValuesNow(tool, D = loadDefaults()) {
-  const v = {};
-  for (const k of PRESET_KEYS[tool]) { v[k] = D[k]; if (D[k + 'Ex']) v[k + 'Ex'] = D[k + 'Ex']; }
-  if (tool === 'dist') { v.distDir = D.distDir; v.distShape = D.distShape; }
-  return v;
-}
-// the main number of a saved load, short: "−10", "2, −10", "−1 to −3", or the formula as typed
-function presetSummary(P) {
-  const v = P.values, show = (k, q) => (v[k + 'Ex'] ? v[k + 'Ex'].e : fqNum(q, v[k] || 0));
-  if (P.tool === 'force') return Math.abs(v.fx || 0) < 1e-12 ? show('fy', 'force') : `${show('fx', 'force')}, ${show('fy', 'force')}`;
-  if (P.tool === 'moment') return show('m', 'moment');
-  if (P.tool === 'temp') return Math.abs((v.ttop || 0) - (v.tbot || 0)) < 1e-12 ? show('ttop', 'temp') : `${show('ttop', 'temp')} / ${show('tbot', 'temp')}`;
-  const q = Math.abs(v.qx || 0) < 1e-12 ? show('qy', 'dist') : `${show('qx', 'dist')}, ${show('qy', 'dist')}`;
-  const q2 = Math.abs(v.qx2 || 0) < 1e-12 ? show('qy2', 'dist') : `${show('qx2', 'dist')}, ${show('qy2', 'dist')}`;
-  return (v.distShape === 'linear' ? `${q} to ${q2}` : q) + (v.distDir === 'local' ? ' (member)' : '');
-}
-const presetCase = P => P.case != null && st.model.cases.find(c => c.id === P.case);
-// a saved load is lit when the tool's values (and the load case being edited) are its own
-function presetIsOn(P, D) {
-  const now = presetValuesNow(P.tool, D);
-  const same = (a, b) => (typeof a === 'number' && typeof b === 'number' ? Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a)) : JSON.stringify(a ?? null) === JSON.stringify(b ?? null));
-  const keys = new Set([...Object.keys(now), ...Object.keys(P.values)]);
-  return [...keys].every(k => same(now[k], P.values[k])) && (!presetCase(P) || P.case === editCaseId());
-}
-function presetKey(tool) {
-  const D = loadDefaults(), list = (st.model.presets || []).filter(P => P.tool === tool);
-  return `|${list.map(P => `${P.id}:${P.name}:${presetSummary(P)}:${P.case}:${presetIsOn(P, D) ? 1 : 0}`).join()}|${st.presetDraft || ''}|${st.model.cases.map(c => c.id + c.name).join()}|${editCaseId()}`;
-}
-function presetsHTML(tool) {
-  if (!PRESET_TOOLS.includes(tool)) return '';
-  const D = loadDefaults(), list = (st.model.presets || []).filter(P => P.tool === tool);
-  const chips = list.map(P => {
-    const c = presetCase(P), label = `${P.name} ${presetSummary(P)}${c ? ` → ${c.name}` : ''}`;
-    return `<span class="ob-chip${presetIsOn(P, D) ? ' on' : ''}"><button type="button" data-pid="${P.id}" title="${esc(`Use these values${c ? ` and the load case "${c.name}"` : ''}: ${label}`)}">${esc(label)}</button><button type="button" class="x" data-pdel="${P.id}" title="Delete this saved load (Ctrl+Z brings it back)">×</button></span>`;
-  }).join('');
-  if (st.presetDraft === tool) { // naming the values being saved, and the load case they go into
-    return `<span class="ob-presets">${chips}<input type="text" id="ob-pname" placeholder="Name, e.g. D" autocomplete="off" spellcheck="false" title="A short name: D, L, Lr, W…">`
-      + `<select id="ob-pcase" title="The load case it goes into: a click on it also picks this case">${st.model.cases.map(c => obOpt(c.id, c.name, editCaseId())).join('')}<option value="">any (the one at the top)</option></select>`
-      + `<button class="btn small primary" type="button" data-pok>Save</button><button class="btn small" type="button" data-pcancel>Cancel</button></span>`;
-  }
-  return `<span class="ob-presets">${chips}<button class="btn small" type="button" data-psave title="Save these values (and a load case) as a button here, for this project">+ Save</button></span>`;
-}
-function applyPreset(P) {
-  for (const k of PRESET_KEYS[P.tool]) { setToolValue(k, P.values[k]); setToolValue(k + 'Ex', P.values[k + 'Ex']); }
-  if (P.tool === 'dist') { setToolValue('distDir', P.values.distDir); setToolValue('distShape', P.values.distShape); }
-  const c = presetCase(P);
-  if (c && st.activeCase !== c.id) { st.activeCase = c.id; recalc(); renderCaseSel(); renderPanel(); }
-  else if (P.case != null && !c) flash(`The load case of "${P.name}" was deleted: the values are set, the case stays as it is.`, true);
-  $('#optbar').dataset.key = ''; render();
-}
-function savePreset() {
-  const name = ($('#ob-pname').value || '').trim(), cs = $('#ob-pcase').value, tool = st.presetDraft;
-  if (!name) { flash('Give it a short name, e.g. D or L.', true); $('#ob-pname').focus(); return; }
-  commit(() => { (st.model.presets = st.model.presets || []).push({ id: newId('preset'), name, tool, values: presetValuesNow(tool), case: cs === '' ? null : Number(cs) }); });
-  st.presetDraft = null; $('#optbar').dataset.key = ''; render();
-  flash(`Saved "${name}". Click it to use these values${cs !== '' ? ' and its load case' : ''}; × deletes it.`);
-}
 function renderOptBar() {
   const bar = $('#optbar'), wrap = $('#wrap'), tool = optBarMode(), m = st.model, X = st.xcmd;
   const ps = (m && m.params) || [], names = list => list.map(x => `${x.id}:${x.name}`).join();
@@ -9291,7 +9563,7 @@ function renderOptBar() {
     : tool === 'xcmd' ? `xcmd|${X.kind}|${X.selecting}|${!!X.base}|${X.keep}|${unit('len')}|${X.kind === 'copy' && !!X.copies}`
     : tool === 'dim' ? `dim|${dimKind()}`
     : tool === 'node' ? `node|${unit('len')}|${!!st.nodeRel}`
-    : `${tool}|${TOOL_FIELDS[tool].map(f => f[2] === 'deg' ? '°' : unit(f[2])).join()}|${ps.map(p => `${p.name}=${p.v}`).join()}${dist}${PRESET_TOOLS.includes(tool) ? presetKey(tool) : ''}`;
+    : `${tool}|${TOOL_FIELDS[tool].map(f => f[2] === 'deg' ? '°' : unit(f[2])).join()}|${ps.map(p => `${p.name}=${p.v}`).join()}${dist}`;
   // not while a field is being typed in (unless the bar is for something else now: a command finished, say)
   const a = document.activeElement, typing = a && bar.contains(a) && a.tagName === 'INPUT' && (bar.dataset.key || '').split('|')[0] === key.split('|')[0];
   if (key !== bar.dataset.key && !typing) redrawOptBar(bar, wrap, tool, key);
@@ -9417,24 +9689,6 @@ window.addEventListener('storage', e => { if (!e.key || e.key === 'frame-studio-
       st.typed = nodeTypedFromBar(); reaim();
     }
     if (t.dataset.dr) { st.distRange = { ...st.distRange, [t.dataset.dr]: t.value }; render(); }
-  });
-  // saved load values: a chip sets its values (and load case), × deletes it, + Save names the values now
-  bar.addEventListener('click', e => {
-    const b = e.target.closest('[data-pid], [data-pdel], [data-psave], [data-pok], [data-pcancel]');
-    if (!b) return;
-    const P = id => (st.model.presets || []).find(x => x.id === Number(id));
-    if (b.dataset.pid) { const p = P(b.dataset.pid); if (p) applyPreset(p); }
-    else if (b.dataset.pdel) {
-      const p = P(b.dataset.pdel);
-      if (p) { commit(() => { st.model.presets = st.model.presets.filter(x => x !== p); }); bar.dataset.key = ''; render(); flash(`Deleted "${p.name}". Ctrl+Z brings it back.`); }
-    } else if (b.hasAttribute('data-psave')) { st.presetDraft = st.tool; bar.dataset.key = ''; render(); const n = $('#ob-pname'); if (n) n.focus(); }
-    else if (b.hasAttribute('data-pok')) savePreset();
-    else { st.presetDraft = null; bar.dataset.key = ''; render(); }
-  });
-  bar.addEventListener('keydown', e => {
-    if (e.target.id !== 'ob-pname') return;
-    if (e.key === 'Enter') { e.preventDefault(); savePreset(); }
-    if (e.key === 'Escape') { e.stopPropagation(); st.presetDraft = null; bar.dataset.key = ''; e.target.blur(); render(); }
   });
   bar.addEventListener('keydown', e => {
     const t = e.target;
@@ -10152,9 +10406,11 @@ function drawLoads(g, C) {
   // every distributed load as drawn (the full-length loads of a member added up; each partial load on its own),
   // also those off screen, since a run may reach them. Kept from one redraw to the next until the model or the case
   // shown changes (a large model has thousands; a redraw then only draws the ones in view), and made afresh while a
-  // load is dragged along its member.
+  // load is dragged along its member or nodes are dragged (the model changes under the drag, and the undo step comes
+  // only on release, so the loads would otherwise stay where they were until then).
   const dKey = [m, st.undo.length, st.redo.length, JSON.stringify(cases)];
-  const dHit = live && !(st.drag && st.drag.kind === 'load') && distCache && dKey.every((v, i) => v === distCache.key[i]);
+  const dragging = st.drag && (st.drag.kind === 'load' || (st.drag.kind === 'move' && st.drag.moved));
+  const dHit = live && !dragging && distCache && dKey.every((v, i) => v === distCache.key[i]);
   const { dist, parts, pieces } = dHit ? distCache : (() => {
   const dist = new Map(), parts = new Map(), pieces = [];
   for (const mb of m.members) {
@@ -11135,7 +11391,7 @@ svg.addEventListener('pointerdown', e => {
       commit(() => deleteTargetNow(t));
       st.hoverDel = deleteTarget(px, py); st.hoverLoad = st.hoverDel && st.hoverDel.kind === 'load' ? st.hoverDel.ld : null; // what is under the cursor now
       render();
-    }
+    } else if (st.sel.nodes.size || st.sel.members.size || st.sel.dims.size) { clearSel(); renderPanel(); render(); } // empty space: nothing selected, as with Select
   }
 });
 svg.addEventListener('pointermove', e => {
@@ -11233,6 +11489,7 @@ svg.addEventListener('pointermove', e => {
   if (d && d.kind === 'box') {
     d.x2 = px; d.y2 = py;
     if (Math.hypot(px - d.px, py - d.py) >= 4) d.moved = true;
+    if (d.del && d.moved) { d.sets = boxDeletes(d); st.hoverDel = null; st.hoverLoad = null; }
     render(); return;
   }
   if (d && d.kind === 'move') {
@@ -11409,6 +11666,34 @@ svg.addEventListener('wheel', e => {
 // AutoCAD-style box selection, in screen coordinates.
 // Window (dragged left to right): only items completely inside. Crossing (right to left): anything inside or touched.
 function boxSelect(d) {
+  const got = boxContents(d);
+  for (const k of ['nodes', 'members', 'dims']) got[k].forEach(id => st.sel[k].add(id));
+  if (st.tab !== 'elements') st.tab = 'props';
+  renderTabs();
+}
+// Box delete (a touch screen's Delete button held while a finger aims, app-touch.js): what boxDeletes gives goes,
+// as the Delete key deletes a selection. The selection keeps what is left of it.
+// What a box delete takes: the members and dimension lines in the box, and the nodes in it that are then left
+// with no member (a node in the box whose other members reach outside it stays, with them)
+function boxDeletes(d) {
+  const got = boxContents(d);
+  for (const id of [...got.nodes]) if (st.model.members.some(mb => (mb.i === id || mb.j === id) && !got.members.has(mb.id))) got.nodes.delete(id);
+  return got;
+}
+function deleteBox(d) {
+  const got = d.sets || boxDeletes(d), n = got.nodes.size, mbs = got.members.size, dms = got.dims.size;
+  if (!n && !mbs && !dms) return;
+  const was = st.sel;
+  st.sel = got; deleteSelection();
+  const ids = new Set(st.model.members.map(x => x.id)), nids = new Set(st.model.nodes.map(x => x.id)), dids = new Set((st.model.dims || []).map(x => x.id));
+  st.sel = { nodes: new Set([...was.nodes].filter(i => nids.has(i))), members: new Set([...was.members].filter(i => ids.has(i))), dims: new Set([...was.dims].filter(i => dids.has(i))) };
+  const words = [[mbs, 'member'], [n, 'node'], [dms, 'dimension line']].filter(([k]) => k).map(([k, w]) => `${k} ${w}${k === 1 ? '' : 's'}`);
+  flash(`Deleted ${words.join(', ')}. Ctrl+Z brings ${n + mbs + dms === 1 ? 'it' : 'them'} back.`);
+}
+// the nodes, members and dimension lines a box takes: left to right, those wholly inside it; right to left, those
+// it touches
+function boxContents(d) {
+  const got = { nodes: new Set(), members: new Set(), dims: new Set() };
   const x0 = Math.min(d.px, d.x2), x1 = Math.max(d.px, d.x2), y0 = Math.min(d.py, d.y2), y1 = Math.max(d.py, d.y2);
   const crossing = d.x2 < d.px;
   const inside = ([x, y]) => x >= x0 && x <= x1 && y >= y0 && y <= y1;
@@ -11423,18 +11708,17 @@ function boxSelect(d) {
     }
     return true;
   };
-  for (const n of st.model.nodes) if (inside(toScreen(n.x, n.y))) st.sel.nodes.add(n.id);
+  for (const n of st.model.nodes) if (inside(toScreen(n.x, n.y))) got.nodes.add(n.id);
   for (const mb of st.model.members) {
     const a = toScreen(nodeById(mb.i).x, nodeById(mb.i).y), b = toScreen(nodeById(mb.j).x, nodeById(mb.j).y);
-    if (crossing ? touches(a, b) : inside(a) && inside(b)) st.sel.members.add(mb.id);
+    if (crossing ? touches(a, b) : inside(a) && inside(b)) got.members.add(mb.id);
   }
   if (st.view === 'model' && dimsShown('model')) for (const dm of st.model.dims || []) { // dimension lines, judged by the line itself
     const pa = dimPt(dm.a), pb = dimPt(dm.b); if (!pa || !pb) continue;
     const G = dimGeom(pa, pb, dm.kind, dm.offset), a = toScreen(...G.A2), b = toScreen(...G.B2);
-    if (crossing ? touches(a, b) : inside(a) && inside(b)) st.sel.dims.add(dm.id);
+    if (crossing ? touches(a, b) : inside(a) && inside(b)) got.dims.add(dm.id);
   }
-  if (st.tab !== 'elements') st.tab = 'props';
-  renderTabs();
+  return got;
 }
 function toggle(set, id) { if (set.has(id)) set.delete(id); else set.add(id); }
 function selectOnly(kind, id) {
@@ -11600,7 +11884,7 @@ window.addEventListener('keydown', e => {
 
 /* ---------------- toolbar ---------------- */
 function setTool(t) {
-  st.tool = t; st.pending = null; st.typed = ''; st.memberDir = null; st.supAngle = null; st.dimDraft = null; st.paste = null; st.nodeAxis = null; st.presetDraft = null;
+  st.tool = t; st.pending = null; st.typed = ''; st.memberDir = null; st.supAngle = null; st.dimDraft = null; st.paste = null; st.nodeAxis = null;
   if (st.gridPick) { st.gridPick = null; $('#btn-grid-origin').classList.remove('on'); } // picking a tool stops a grid-origin pick
   st.xcmd = null; // and a move / copy / rotate / mirror
   document.querySelectorAll('[data-tool]').forEach(b => b.classList.toggle('on', toolIsOn(b)));
