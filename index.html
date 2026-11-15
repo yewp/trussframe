@@ -8783,12 +8783,21 @@ function ghostDistLoad(g, C, ax, ay, bx, by, opacity = 0.6, mb = null) {
 // the height of the options bar over the top of the drawing (labels keep below it)
 const obTop = () => { const b = document.getElementById('optbar'); return b && !b.hidden ? b.offsetHeight : 0; };
 // small boxed text next to the cursor while drawing or dragging
+// The box of words beside the cursor. It sits up and to the right of the point; near the right edge it slides left
+// just enough to stay inside the drawing (it used to jump to the other side of the point, and back, as the cursor
+// moved about near the edge). Its width is the text's measured width (a guess from the number of letters was too
+// small, so a box near the edge was cut off, or flipped as the numbers in it changed).
 function liveLabel(g, x, y, lines, C) {
   if (!lines.length) return; // nothing to say (an empty box would have no width)
-  const w =Math.max(...lines.map(s => s.length)) * 6.7 + 12, h = lines.length * 15 + 6;
-  const { w: vw } = viewSize(), left = Math.max(2, x + 14 + w > vw ? x - 14 - w : x + 14), top = y - 14 - h < obTop() ? y + 14 : y - 14 - h; // never off the left edge or under the options bar
-  g.appendChild(el('rect', { x: left, y: top, width: w, height: h, rx: 3, fill: C.sheet, stroke: C.accent, 'stroke-width': 1 }));
-  lines.forEach((s, i) => g.appendChild(el('text', { x: left + 6, y: top + 15 + i * 15, style: 'stroke-width:0' }, s)));
+  const h = lines.length * 15 + 6, rect = el('rect', { rx: 3, height: h, fill: C.sheet, stroke: C.accent, 'stroke-width': 1 });
+  g.appendChild(rect);
+  const texts = lines.map(s => g.appendChild(el('text', { style: 'stroke-width:0' }, s)));
+  let tw = 0;
+  try { tw = Math.max(...texts.map(t => t.getComputedTextLength())); } catch (e) { /* not laid out (off the page) */ }
+  const w = (tw > 0 ? tw : Math.max(...lines.map(s => s.length)) * 7.4) + 12;
+  const { w: vw } = viewSize(), left = Math.max(2, Math.min(x + 14, vw - w - 2)), top = y - 14 - h < obTop() ? y + 14 : y - 14 - h; // never off either edge or under the options bar
+  rect.setAttribute('x', left); rect.setAttribute('y', top); rect.setAttribute('width', w);
+  texts.forEach((t, i) => { t.setAttribute('x', left + 6); t.setAttribute('y', top + 15 + i * 15); });
 }
 
 /* ---------------- dimension lines ---------------- */
