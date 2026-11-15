@@ -335,6 +335,14 @@ textarea.ftl { width: 100%; height: 160px; font-family: var(--font-data); font-s
 #def-menu { min-width: 280px; }
 /* Units & number formatting dialog */
 .dialog.units-dialog { width: min(660px, 100%); height: auto; max-height: 100%; grid-template-rows: auto minmax(0, 1fr) auto; }
+.dialog.settings-dialog { width: min(520px, 100%); height: auto; max-height: 100%; grid-template-rows: auto minmax(0, 1fr) auto; }
+#settings-body { padding: 4px 18px 12px; overflow: auto; }
+#settings-body h3 { margin: 14px 0 6px; font-size: 14px; }
+#settings-body .chk { display: flex; align-items: center; gap: 8px; margin: 6px 0; min-height: 32px; }
+#btn-settings svg { display: block; }
+/* Properties ▸ Deformation: axial and shear belong to Flexible member, under it */
+.box.deform .deform-sub { padding-left: 26px; flex-wrap: wrap; gap: 2px 16px; }
+.box.deform .row { margin: 2px 0; }
 #units-body { padding: 12px 18px; }
 .units-presets { display: flex; justify-content: space-around; gap: 10px; margin-bottom: 10px; }
 .units-presets .btn { min-width: 84px; }
@@ -729,8 +737,10 @@ html, body { margin: 0; }
 /* the number pad (a finger in a number box of the tool's settings bar): docked at the bottom, the page above it */
 #numpad { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; background: var(--panel); border-top: 1px solid var(--line);
   padding: 6px max(8px, env(safe-area-inset-left, 0px)) max(8px, env(safe-area-inset-bottom, 0px)); box-shadow: 0 -4px 14px rgba(0, 0, 0, .12); }
-#numpad .np-recent { display: none; gap: 6px; overflow-x: auto; padding-bottom: 6px; scrollbar-width: none; max-width: 520px; margin: 0 auto; }
-#numpad.has-recent .np-recent { display: flex; }
+/* its top row: the box's name and unit, then the values used last for it */
+#numpad .np-top { display: flex; align-items: center; gap: 8px; min-height: 40px; padding-bottom: 6px; max-width: 520px; margin: 0 auto; }
+#numpad .np-name { flex: none; font-size: 13px; color: var(--muted); white-space: nowrap; max-width: 40%; overflow: hidden; text-overflow: ellipsis; }
+#numpad .np-recent { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; min-width: 0; }
 #numpad .np-recent button { flex: none; min-height: 34px; padding: 0 14px; border-radius: 17px; border: 1px solid var(--line);
   background: var(--accent-soft); color: var(--ink); font: 500 15px 'IBM Plex Mono', ui-monospace, monospace; }
 #numpad .np-keys { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; max-width: 520px; margin: 0 auto; }
@@ -746,6 +756,9 @@ html, body { margin: 0; }
 .app.numpad-on { padding-bottom: var(--numpad-h, 0px); }
 /* the value the pad's first key will replace */
 #optbar input.np-all { background: var(--accent-soft); }
+/* the box the pad types into: a steady outline, whether or not it has the focus at that moment */
+#optbar input.np-on, #optbar input.np-on:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#numpad .np-keys button { touch-action: none; -webkit-touch-callout: none; }
 /* a phone turned sideways: the pad stands at the right, and the page (its settings bar and drawing) beside it
    keeps its height */
 @media (max-height: 500px) and (orientation: landscape) and (min-width: 561px) {
@@ -814,6 +827,7 @@ html, body { margin: 0; }
       <button class="btn" id="btn-display" title="Light, dark or black-on-white display" aria-haspopup="true" aria-expanded="false">Display ▾</button>
       <div class="menu right" id="display-menu" hidden></div>
     </div>
+    <button class="btn icon xtra" id="btn-settings" title="Settings: analysis defaults, touch screen, performance, units" aria-label="Settings"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5h0a1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
     <button class="btn icon xtra" id="btn-help" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
   </header>
 
@@ -904,8 +918,9 @@ html, body { margin: 0; }
         <button data-tab="props" class="on">Properties</button>
         <button data-tab="materials">Materials</button>
         <button data-tab="sections">Sections</button>
-        <button data-tab="loads">Load cases</button>
+        <button data-tab="loads">Load</button>
         <button data-tab="results">Results</button>
+        <button data-tab="design" title="Design checks: steel (AISC 360-22) now, wood and others to come">Design</button>
         <button data-tab="elements">Elements</button>
       </div>
       <div class="panel" id="panel"></div>
@@ -952,6 +967,14 @@ html, body { margin: 0; }
       <button class="btn" id="beam-close">Close</button>
     </div>
     <div class="dialog-body beam" id="beam-body"></div>
+  </div>
+</div>
+
+<div class="overlay" id="settings-dlg" hidden>
+  <div class="dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="dialog-head"><h2 id="settings-title">Settings</h2></div>
+    <div class="dialog-body" id="settings-body"></div>
+    <div class="units-foot"><button class="btn primary" id="settings-close">Close</button></div>
   </div>
 </div>
 
@@ -1910,16 +1933,21 @@ if (IS_NODE && require.main === module) {
       // E of zero gave a misleading "mechanism" message and a negative E solved to nonsense
       if (!(mat.E > 0)) throw new Error(`Material "${mat.name || mat.id}" has an elastic modulus E of ${mat.E} MPa; E must be greater than zero.`);
       if (!sec) throw new Error(`Member ${mb.id} has no section.`);
-      const { A: A0, I, h, As } = sectionProps(sec);
-      if (!(A0 > 0) || !(I > 0)) throw new Error(`Section "${sec.name}" has zero area or inertia.`);
-      // opts.axialRigid: members (nearly) cannot stretch or shorten, as hand methods assume (slope-deflection,
-      // moment distribution, frame formulas): the area is scaled up AXIAL_RIGID times for the whole member,
-      // stiffness and temperature alike, so bending is unchanged and axial strain becomes negligible
-      const A = opts.axialRigid ? A0 * AXIAL_RIGID : A0;
+      const { A: A0, I: I0, h, As } = sectionProps(sec);
+      if (!(A0 > 0) || !(I0 > 0)) throw new Error(`Section "${sec.name}" has zero area or inertia.`);
+      // Deformation constraints, per member (as Ftool's): mb.rigid, a rigid member, which neither bends nor stretches;
+      // otherwise a flexible member, with axial deformation unless mb.axial is false, and shear deformation if
+      // mb.shear is true. A member that does not say takes the model's defaults: opts.axialRigid (no axial
+      // deformation, as hand methods assume: slope-deflection, moment distribution, frame formulas) and opts.shear.
+      // No axial deformation: the area is scaled up AXIAL_RIGID times for the whole member, stiffness and temperature
+      // alike, so bending is unchanged and axial strain becomes negligible; a rigid member has its inertia scaled up
+      // the same, so its bending is negligible too.
+      const rigid = !!mb.rigid, axialOn = !rigid && (mb.axial ?? !opts.axialRigid), shearOn = !rigid && (mb.shear ?? !!opts.shear);
+      const A = axialOn ? A0 : A0 * AXIAL_RIGID, I = rigid ? I0 * AXIAL_RIGID : I0;
       const E = mat.E * 1000, alpha = mat.alpha || 0;
       // shear deformation (Timoshenko) when asked for: G from E and Poisson's ratio
       const G = E / (2 * (1 + (Number.isFinite(mat.nu) ? mat.nu : 0.3)));
-      const GAs = opts.shear && As > 0 ? G * As : Infinity, Phi = opts.shear && As > 0 ? 12 * E * I / (GAs * L * L) : 0;
+      const GAs = shearOn && As > 0 ? G * As : Infinity, Phi = shearOn && As > 0 ? 12 * E * I / (GAs * L * L) : 0;
       const c = dx / L, s = dy / L;
       // self-weight from the real area A0: the axially rigid option scales A for stiffness only
       const ld = memberLoadLocal(c, s, caseId => loads.member(caseId, mb.id), factors, L, (mat.gamma || 0) * A0);
@@ -1965,7 +1993,7 @@ if (IS_NODE && require.main === module) {
         P[dofs[i]] -= fi;
         Pfe[dofs[i]] += fi;
       }
-      elems.push({ mb, a, b, L, c, s, E, A, I, h, As, G, Phi, alpha, k0, R0: R, rel, k, R: Rs, kth, Tc, ld, dofs, kg });
+      elems.push({ mb, a, b, L, c, s, E, A, I, A0, I0, rigid, axialOn, shearOn, h, As, G, Phi, alpha, k0, R0: R, rel, k, R: Rs, kth, Tc, ld, dofs, kg });
     }
 
     // nodal loads and prescribed displacements
@@ -6052,6 +6080,31 @@ function changed() {
 /* ---------------- analysis ---------------- */
 // (a node no member is attached to carries nothing, so it is left out: a lone node, or a support placed in
 // empty space before members are drawn to it, would otherwise make the whole model a mechanism)
+// Settings kept in this browser, not with the model: vibration and the number pad on a touch screen
+function appPrefs() {
+  let o = {};
+  try { o = JSON.parse(localStorage.getItem('frame-studio-settings')) || {}; } catch (e) { /* storage unavailable */ }
+  return { vibrate: o.vibrate !== false, numpad: o.numpad !== false };
+}
+function setAppPref(k, v) {
+  const o = appPrefs(); o[k] = v;
+  try { localStorage.setItem('frame-studio-settings', JSON.stringify(o)); } catch (e) { /* storage unavailable */ }
+  if (typeof numpadPrepare === 'function') numpadPrepare(); // (the number boxes take the phone's keyboard, or the pad)
+}
+// A member's deformation constraints (Properties ▸ Deformation): rigid, or flexible with or without axial and shear
+// deformation; a member that does not say takes the model's defaults (Settings ▸ Analysis)
+function memberDeform(mb, m = st.model) {
+  const rigid = !!mb.rigid;
+  return { rigid, axial: !rigid && (mb.axial ?? !m.axialRigid), shear: !rigid && (mb.shear ?? !!m.shearDef) };
+}
+// in words, for the report and the panel: "shear deformation in 2 members, 1 rigid member", or '' when every member
+// is plain Euler-Bernoulli with axial deformation
+function deformSummary(m = st.model) {
+  const ds = m.members.map(mb => memberDeform(mb, m)), n = k => ds.filter(k).length, all = ds.length;
+  const part = (k, one, many) => (k ? (k === all ? `all members ${many}` : `${k} member${k === 1 ? '' : 's'} ${k === 1 ? one : many}`) : '');
+  return [part(n(d => d.shear), 'with shear deformation (Timoshenko)', 'with shear deformation (Timoshenko)'),
+    part(n(d => !d.rigid && !d.axial), 'axially rigid', 'axially rigid'), part(n(d => d.rigid), 'rigid', 'rigid')].filter(Boolean).join(', ');
+}
 function solverModel(m = st.model) {
   const used = new Set(m.members.flatMap(mb => [mb.i, mb.j]));
   return {
@@ -6122,7 +6175,7 @@ function analyzeFor(active, opts, m = st.model) {
   return r;
 }
 // Two envelopes, as in Ftool: of the load combinations ('env') and of the load cases ('envc'). Each covers the
-// ones ticked "In envelope" in the Load cases tab; the model stores what is left out (m.envExclude), so a new
+// ones ticked "In envelope" in the Load tab; the model stores what is left out (m.envExclude), so a new
 // case or combination is in by default.
 const isEnv = v => v === 'env' || v === 'envc';
 function envelopeRuns(kind = 'env', m = st.model) {
@@ -7497,7 +7550,7 @@ let touchFrom = null, touchLift = 0; // where the aiming finger came down, and h
 const TOUCH_HOLD = 500; // ms
 let touchHoldT = 0, touchSelWas = null, touchMenuShut = false;
 const touchHoldOff = () => { clearTimeout(touchHoldT); touchHoldT = 0; };
-const touchBuzz = ms => { try { if (navigator.vibrate) navigator.vibrate(ms); } catch (err) { /* not allowed here */ } };
+const touchBuzz = ms => { try { if (navigator.vibrate && appPrefs().vibrate) navigator.vibrate(ms); } catch (err) { /* not allowed here */ } }; // (Settings ▸ Touch screen)
 function touchHold(e, p) {
   touchHoldOff();
   if (st.pending != null || st.xcmd || st.paste || st.gridPick || st.print) return;
@@ -7947,25 +8000,32 @@ window.addEventListener('resize', () => fitMenus.forEach(menuFit));
 
 // ---------- the number pad ----------
 // On a touch screen the phone's own keyboard covers half the screen, and its number keyboard often has no minus
-// sign. So a number box in the tool's settings bar (Length, Angle, x, y, Δx, Δy, From, To, the load values),
-// tapped with a finger, opens this pad instead: the digits, minus, point, Backspace, Next (the next box in the bar)
-// and Enter (as the Enter key: it places the member, the node, the move…), a ':' for a slope in an Angle box, and a
-// row of the values used last for that kind of box (lengths, angles, forces…), kept in this browser. ABC brings the
-// phone's keyboard back for that box (a load value can be a formula, such as 1.2*D). A mouse or a pen gets the box
+// sign. So a number box in the tool's settings bar (Length, Angle, x, y, Δx, Δy, From, To, the load values, a
+// support's angle, the number of copies), tapped with a finger, opens this pad instead:
+//  - its top row names the box (with its unit) and offers the values used last for that kind of box (lengths,
+//    angles, forces…), kept in this browser;
+//  - the digits and the point (one point to a number), ± (the sign of the whole value), ⌫ (held: it repeats, and
+//    held on, it clears the box), a ':' in an Angle box for a slope such as 4:12;
+//  - Next (the next box: Length to Angle, x to y), Enter (the box is done: the pad goes), Hide, and ABC (the
+//    phone's keyboard, for that box: a load value can be a formula, such as 1.2*D).
+// The pad types at the end of the box: the phone draws no caret in it (see numpadPrepare), so there is no hidden
+// place in the middle for a key to go. A box that already holds a value is shaded when the pad opens on it: the
+// first key replaces it, as on a calculator; ⌫ or a tap on the box keeps it, to be edited from its end. Enter
+// finishes the box and hides the pad (what is typed is then placed on the drawing). A mouse or a pen gets the boxes
 // as before.
 const NUMPAD_KEY = 'frame-studio-recent-numbers';
 const numpadEl = document.createElement('div');
 numpadEl.id = 'numpad'; numpadEl.hidden = true; numpadEl.setAttribute('role', 'group'); numpadEl.setAttribute('aria-label', 'Number pad');
-numpadEl.innerHTML = `<div class="np-recent" aria-label="Values used last"></div><div class="np-keys">
-  ${['7', '8', '9'].map(k => `<button type="button" data-np="${k}">${k}</button>`).join('')}<button type="button" data-np="back" aria-label="Backspace">⌫</button><button type="button" data-np="hide" title="Hide the number pad">Hide</button>
-  ${['4', '5', '6'].map(k => `<button type="button" data-np="${k}">${k}</button>`).join('')}<button type="button" data-np="-" aria-label="Minus">−</button><button type="button" data-np="abc" title="The phone's keyboard, for this box">ABC</button>
-  ${['1', '2', '3'].map(k => `<button type="button" data-np="${k}">${k}</button>`).join('')}<button type="button" data-np=".">.</button><button type="button" data-np="next">Next</button>
-  <button type="button" data-np="0" class="np-wide">0</button><button type="button" data-np=":" class="np-colon" title="A slope, such as 4:12">:</button><button type="button" data-np="enter" class="np-wide np-enter">Enter</button>
+const npKey = (k, label, extra = '') => `<button type="button" data-np="${k}"${extra}>${label}</button>`;
+numpadEl.innerHTML = `<div class="np-top"><span class="np-name"></span><span class="np-recent" aria-label="Values used last"></span></div><div class="np-keys">
+  ${npKey('7', '7')}${npKey('8', '8')}${npKey('9', '9')}${npKey('back', '⌫', ' aria-label="Backspace (hold to repeat, then to clear)"')}${npKey('hide', 'Hide', ' title="Hide the number pad"')}
+  ${npKey('4', '4')}${npKey('5', '5')}${npKey('6', '6')}${npKey('sign', '±', ' aria-label="Change the sign"')}${npKey('abc', 'ABC', ' title="The phone\'s keyboard, for this box"')}
+  ${npKey('1', '1')}${npKey('2', '2')}${npKey('3', '3')}${npKey('.', '.')}${npKey('next', 'Next')}
+  ${npKey('0', '0', ' class="np-wide"')}${npKey(':', ':', ' class="np-colon" title="A slope, such as 4:12"')}${npKey('enter', 'Enter', ' class="np-wide np-enter"')}
 </div>`;
 document.body.appendChild(numpadEl);
 let numpadTouch = false, numpadFor = null; // the last press was a finger; the box the pad is typing into
-let numpadCaret = null; // where the pad's next key goes in that box (null: at the end)
-let numpadAll = false, numpadSince = 0, numpadOrig = ''; // (numpadOrig: the box's value when the pad came to it) // the box's value is all selected (the first key replaces it, as on a calculator); when the pad came to it
+let numpadAll = false, numpadSince = 0, numpadOrig = ''; // its value is to be replaced by the first key; when the pad came to it; its value then
 // the bar's boxes the pad serves (not one switched to the phone's keyboard)
 const numpadBox = el => !!el && el.tagName === 'INPUT' && !!el.closest('#optbar') && (el.type === 'text' || el.type === 'number')
   && !el.dataset.npKeyboard;
@@ -7981,20 +8041,24 @@ function numpadRemember(el) {
 }
 // The boxes switch the phone's keyboard off while a finger is in use, and back on for a mouse: inputmode none, and
 // read-only as well, since inputmode is only a hint and a phone may raise its keyboard anyway (the pad changes the
-// value itself, so read-only does not stop it).
+// value itself, so read-only does not stop it). A number-only box (a support's angle, the copies) is a text box
+// meanwhile: it would blank a lone "−" or "." as the number is typed.
 function numpadPrepare() {
   for (const el of document.querySelectorAll('#optbar input')) {
-    if (!numpadBox(el)) { if (el.dataset.npRo) { el.readOnly = false; delete el.dataset.npRo; } continue; }
-    if (!('npMode' in el.dataset)) el.dataset.npMode = el.getAttribute('inputmode') || '';
-    if (numpadTouch) { el.setAttribute('inputmode', 'none'); if (!el.readOnly) { el.readOnly = true; el.dataset.npRo = '1'; } }
-    else {
-      if (el.dataset.npMode) el.setAttribute('inputmode', el.dataset.npMode); else el.removeAttribute('inputmode');
+    const ours = numpadBox(el) && numpadTouch && appPrefs().numpad; // (Settings ▸ Touch screen: off, the phone's keyboard)
+    if (ours) {
+      if (!('npMode' in el.dataset)) el.dataset.npMode = el.getAttribute('inputmode') || '';
+      el.setAttribute('inputmode', 'none');
+      if (!el.readOnly) { el.readOnly = true; el.dataset.npRo = '1'; }
+      if (el.type === 'number') { el.dataset.npType = 'number'; el.type = 'text'; }
+    } else {
+      if ('npMode' in el.dataset) { if (el.dataset.npMode) el.setAttribute('inputmode', el.dataset.npMode); else el.removeAttribute('inputmode'); }
       if (el.dataset.npRo) { el.readOnly = false; delete el.dataset.npRo; }
+      if (el.dataset.npType) { el.type = el.dataset.npType; delete el.dataset.npType; }
     }
   }
 }
-// the box's value is to be replaced by the first key: shaded (not selected, which would bring up the phone's
-// Cut / Copy bar)
+// the value to be replaced by the first key is shaded (not selected, which would bring up the phone's Cut / Copy bar)
 function numpadSetAll(on) { numpadAll = on; if (numpadFor) numpadFor.classList.toggle('np-all', on); }
 document.addEventListener('pointerdown', e => {
   if (numpadEl.contains(e.target)) return;
@@ -8003,24 +8067,34 @@ document.addEventListener('pointerdown', e => {
 }, true);
 new MutationObserver(numpadPrepare).observe(document.getElementById('optbar'), { childList: true, subtree: true });
 const numpadBoxes = () => [...document.querySelectorAll('#optbar input')].filter(el => numpadBox(el) && el.offsetParent);
+// the box's name and unit, from its label in the bar ("Length ft", "Angle °", "Fy kip")
+function numpadName(el) {
+  const lab = el.closest('label');
+  if (!lab) return '';
+  const name = [...lab.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join(' ').trim(), u = lab.querySelector('.unit');
+  return `${name}${u && u.textContent.trim() ? ' ' + u.textContent.trim() : ''}`;
+}
+function numpadSize() { appEl.style.setProperty('--numpad-h', numpadEl.offsetHeight + 'px'); forgetViewSize(); }
 function numpadShow(el) {
   if (el !== numpadFor) { // a new box: the first key replaces its value
-    if (numpadFor) { numpadCommit(numpadFor); numpadFor.classList.remove('np-all'); }
-    numpadCaret = null; numpadSince = Date.now(); numpadOrig = el.value;
+    if (numpadFor) { numpadCommit(numpadFor); numpadFor.classList.remove('np-all', 'np-on'); }
+    numpadSince = Date.now(); numpadOrig = el.value;
     numpadFor = el; numpadSetAll(el.value.length > 0);
   }
-  numpadFor = el;
+  numpadFor = el; el.classList.add('np-on'); // (a steady outline: the focus may come and go as keys are tapped)
   const kind = numpadKind(el), rec = (kind && numpadRecent()[kind]) || [];
+  numpadEl.querySelector('.np-name').textContent = numpadName(el);
   numpadEl.querySelector('.np-recent').innerHTML = rec.map(v => `<button type="button" data-np-val="${esc(v)}">${esc(v)}</button>`).join('');
-  numpadEl.classList.toggle('has-recent', rec.length > 0);
   numpadEl.classList.toggle('colon', el.dataset.mt === 'ang');
   const list = numpadBoxes();
   numpadEl.querySelector('[data-np="next"]').disabled = list.indexOf(el) >= list.length - 1;
   const wasHidden = numpadEl.hidden;
   numpadEl.hidden = false;
-  appEl.style.setProperty('--numpad-h', numpadEl.offsetHeight + 'px');
-  if (wasHidden) { appEl.classList.add('numpad-on'); forgetViewSize(); render(); }
+  numpadSize();
+  if (wasHidden) { appEl.classList.add('numpad-on'); render(); }
 }
+// the phone turned, or the window resized, with the pad open: the page makes room for it as it now is
+window.addEventListener('resize', () => { if (!numpadEl.hidden) { numpadSize(); render(); } });
 // Boxes save their value on 'change', which a browser sends only for what was typed on its keyboard: the pad
 // sends it itself when it leaves a box it changed (Enter, Next, Hide, a press elsewhere)
 function numpadCommit(el) {
@@ -8029,8 +8103,9 @@ function numpadCommit(el) {
   el.dispatchEvent(new Event('change', { bubbles: true }));
 }
 function numpadHide() {
+  numpadBackStop();
   numpadCommit(numpadFor);
-  if (numpadFor) numpadFor.classList.remove('np-all');
+  if (numpadFor) numpadFor.classList.remove('np-all', 'np-on');
   numpadFor = null;
   if (numpadEl.hidden) return;
   numpadEl.hidden = true; appEl.classList.remove('numpad-on'); forgetViewSize(); render();
@@ -8045,55 +8120,86 @@ document.addEventListener('focusout', e => {
 });
 // The pad stays while its box is in use: a tap on a phone can take the focus from the box before the key is
 // pressed, so losing the focus does not close it. A press anywhere else does (the drawing, the panel, another
-// control), and so do ⌄, and Enter when the box is done (a load value).
+// control), and so do Hide, and Enter when the box is done (a load value).
 document.addEventListener('pointerdown', e => {
   if (!numpadEl.hidden && !numpadEl.contains(e.target) && !numpadBox(e.target)) numpadHide();
 }, true);
-// a tap inside the box moves the caret there, for the pad too
+// a tap on the shaded box keeps its value, to be edited from its end
 document.addEventListener('click', e => {
-  if (e.target !== numpadFor || Date.now() - numpadSince < 600) return; // (not the tap that opened it)
-  setTimeout(() => { numpadSetAll(false); try { numpadCaret = e.target.selectionStart; } catch (err) { /* a number box */ } }, 0);
+  if (e.target === numpadFor && Date.now() - numpadSince > 600) numpadSetAll(false); // (not the tap that opened it)
 }, true);
 // a key that takes the focus hands it straight back to the box
 numpadEl.addEventListener('focusin', () => { if (numpadFor && document.body.contains(numpadFor)) numpadFor.focus({ preventScroll: true }); });
-// the keys: pressed without taking the focus from the box
-numpadEl.addEventListener('pointerdown', e => { if (e.target.closest('button')) e.preventDefault(); });
+// the keys: pressed without taking the focus from the box, each with a short buzz
 numpadEl.addEventListener('mousedown', e => { if (e.target.closest('button')) e.preventDefault(); });
+numpadEl.addEventListener('pointerdown', e => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  e.preventDefault();
+  if (b.dataset.np === 'back') numpadBackStart(e); // ⌫ acts on the press, and repeats while held
+});
+// what a key does to the value (always at its end)
+function numpadType(el, k) {
+  let v = el.value;
+  if (numpadAll && k !== 'sign') { v = ''; numpadSetAll(false); } // the first key replaces the value
+  if (k === 'back') v = v.slice(0, -1);
+  else if (k === 'clear') v = '';
+  else if (k === 'sign') { numpadSetAll(false); v = v === '' || v === '-' || Number(v) === 0 ? (v === '-' ? '' : '-') : v.startsWith('-') ? v.slice(1) : '-' + v; } // (on 0 or nothing: a new negative number)
+  else if (k === '.') {
+    const last = v.split(/[:<,\s]/).pop();
+    if (last.includes('.')) return; // one point to a number
+    v += /\d$/.test(v) ? '.' : '0.';
+  } else v += k;
+  el.value = v;
+  try { el.setSelectionRange(v.length, v.length); } catch (err) { /* not a text box */ }
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+// ⌫ held: after a moment it repeats; held on past a second, it clears the box
+let numpadBackT = 0, numpadBackRep = 0, numpadBackDone = false;
+function numpadBackStop() { clearTimeout(numpadBackT); clearInterval(numpadBackRep); numpadBackT = numpadBackRep = 0; }
+function numpadBackStart(e) {
+  const el = numpadFor;
+  numpadBackStop();
+  if (!el || !document.body.contains(el)) return;
+  numpadBackDone = true; // (the click that follows the press does nothing more)
+  numpadType(el, 'back');
+  const t0 = Date.now();
+  numpadBackT = setTimeout(() => {
+    numpadBackRep = setInterval(() => {
+      if (!numpadFor) { numpadBackStop(); return; }
+      if (Date.now() - t0 > 1100) { numpadType(numpadFor, 'clear'); touchBuzz(20); numpadBackStop(); return; }
+      numpadType(numpadFor, 'back');
+    }, 70);
+  }, 400);
+}
+for (const t of ['pointerup', 'pointercancel']) window.addEventListener(t, numpadBackStop, true);
+numpadEl.addEventListener('contextmenu', e => e.preventDefault()); // (a long press would open the phone's menu and cancel the press)
 numpadEl.addEventListener('click', e => {
   const b = e.target.closest('button'), el = numpadFor;
   if (!b) return;
   if (!el || !document.body.contains(el)) { numpadHide(); return; }
-  if (document.activeElement !== el) { // (focusing it again can select all of it: the caret goes back where it was)
-    el.focus({ preventScroll: true });
-    const at = numpadCaret != null && numpadCaret <= el.value.length ? numpadCaret : el.value.length;
-    try { el.setSelectionRange(at, at); } catch (err) { /* a number box */ }
-  }
-  const input = () => el.dispatchEvent(new Event('input', { bubbles: true }));
-  const put = text => {
-    let a = el.value.length, z = a;
-    try { if (el.selectionStart != null) { a = el.selectionStart; z = el.selectionEnd; } } catch (err) { /* a number box has no caret */ }
-    if (numpadAll) { a = 0; z = el.value.length; numpadSetAll(false); } // the first key replaces the value
-    if (text === null) { if (a === z) a = Math.max(0, a - 1); text = ''; } // Backspace
-    el.value = el.value.slice(0, a) + text + el.value.slice(z);
-    numpadCaret = a + text.length;
-    try { el.setSelectionRange(numpadCaret, numpadCaret); } catch (err) { /* a number box */ }
-    input();
-  };
-  if (b.dataset.npVal != null) { numpadSetAll(false); el.value = b.dataset.npVal; numpadCaret = el.value.length; try { el.setSelectionRange(numpadCaret, numpadCaret); } catch (err) { /* a number box */ } input(); return; }
+  if (document.activeElement !== el) el.focus({ preventScroll: true });
+  if (b.dataset.npVal != null) { numpadSetAll(false); el.value = b.dataset.npVal; try { el.setSelectionRange(el.value.length, el.value.length); } catch (err) { /* not a text box */ } el.dispatchEvent(new Event('input', { bubbles: true })); return; }
   const k = b.dataset.np;
-  if (k === 'back') put(null);
+  if (k === 'back') { if (numpadBackDone) numpadBackDone = false; else numpadType(el, 'back'); } // (done on the press; a keyboard's Enter on it has no press)
   else if (k === 'hide') { numpadCommit(el); el.blur(); numpadHide(); }
-  else if (k === 'abc') { el.dataset.npKeyboard = '1'; el.classList.remove('np-all'); if (el.dataset.npRo) { el.readOnly = false; delete el.dataset.npRo; } if (el.dataset.npMode) el.setAttribute('inputmode', el.dataset.npMode); else el.removeAttribute('inputmode'); numpadHide(); el.blur(); el.focus(); }
-  else if (k === 'next') { numpadRemember(el); numpadCommit(el); const list = numpadBoxes(), i = list.indexOf(el); if (list[i + 1]) list[i + 1].focus(); }
-  else if (k === 'enter') {
-    numpadRemember(el); numpadCommit(el);
-    numpadOrig = ''; // (a member or node box is emptied for the next one)
-    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
-    const now = document.activeElement;
-    if (numpadBox(now)) numpadShow(now); // (the member and node boxes take the next one at once)
-    else numpadHide(); // (a load value is done)
-  } else put(k);
+  else if (k === 'abc') {
+    el.dataset.npKeyboard = '1'; el.classList.remove('np-all');
+    numpadHide(); numpadPrepare(); // (the box gets its inputmode, type and editing back)
+    el.blur(); el.focus();
+  } else if (k === 'next') { numpadRemember(el); numpadCommit(el); const list = numpadBoxes(), i = list.indexOf(el); if (list[i + 1]) list[i + 1].focus(); }
+  else if (k === 'enter') { numpadRemember(el); numpadCommit(el); el.blur(); numpadHide(); } // (the drawing then places what is typed)
+  else numpadType(el, k);
 });
+
+// A short buzz for every button a finger presses, all over the page (the tools, the header, the tabs, the panel, the
+// number pad, a tick box…), as a phone's own keys do. (Buttons that do something larger, such as Delete, buzz again
+// for that.)
+document.addEventListener('pointerdown', e => {
+  if (e.pointerType !== 'touch') return;
+  const b = e.target.closest && e.target.closest('button, .btn, .tool, select, summary, label.chk, input[type="checkbox"], input[type="radio"], [role="button"], [role="tab"]');
+  if (b && !b.disabled) touchBuzz(6);
+}, true);
 
 </script>
 <script>'use strict';
@@ -10508,6 +10614,9 @@ function drawLoads(g, C) {
   // - A run is labelled at its two ends, each with the value there, beyond the last arrow: left-aligned at the left
   //   end and right-aligned at the right, so they stand clear of the load. An end at zero has none. Each end's
   //   label is drawn with the piece at that end.
+  // - A run is also labelled where it turns: where two of its loads meet at the same value but at different slopes
+  //   (a triangle rising to 40 joined by a partial load falling from 40, say), with the value there, over that point.
+  //   The piece on the near side (lower along the run) draws it.
   // - A run with the same load from end to end has one label, over its middle.
   // - With Display ▾ "Label every piece of a distributed load", every piece has its own, over its middle.
   const eachPiece = !!displayOpts().distEach, distBoxes = []; // distBoxes: where the labels placed so far are, on screen
@@ -10543,6 +10652,21 @@ function drawLoads(g, C) {
       return out;
     }
     const [E0, E1] = pieceEnds(pc);
+    // where the run turns, at this piece's far end: the slope of its load there differs from the next piece's
+    const keyOf = P => Math.round(P[0] * 1e5) + ',' + Math.round(P[1] * 1e5);
+    const slope = (p, e) => { const d = run.along(p.P[e]) - run.along(p.P[1 - e]); return d ? [(p.v[e][0] - p.v[1 - e][0]) / d, (p.v[e][1] - p.v[1 - e][1]) / d] : null; };
+    for (const e of [0, 1]) {
+      const P = pc.P[e], k = keyOf(P);
+      if (k === keyOf(run.lo.P) || k === keyOf(run.hi.P) || run.along(P) <= run.along(pc.P[1 - e])) continue; // (an end of the run, or the near end)
+      const q = run.pieces.find(o => o !== pc && keyOf(o.P[0]) === k ? true : o !== pc && keyOf(o.P[1]) === k);
+      if (!q || Math.hypot(pc.v[e][0], pc.v[e][1]) <= tiny) continue;
+      const qe = keyOf(q.P[0]) === k ? 0 : 1, s1 = slope(pc, e), s2 = slope(q, qe), span = run.hi.d - run.lo.d || 1;
+      if (!s1 || !s2 || Math.hypot(s1[0] - s2[0], s1[1] - s2[1]) * span <= 1e-6 * run.qmax) continue; // (a straight run on: no turn)
+      const [hx, hy] = pieceArrow(pc, e, E0, E1), S = toScreen(...P), tx = S[0] - hx, ty = S[1] + hy;
+      if (Math.hypot(hx, hy) < 1e-6) continue;
+      if (Math.abs(hx) > Math.abs(hy)) put(tx + (hx > 0 ? -5 : 5), ty + 4, hx > 0 ? 'end' : 'start', endText(pc, e), [0, -1]);
+      else put(tx, hy < 0 ? ty - 5 : ty + 13, 'middle', endText(pc, e), [0, hy < 0 ? -1 : 1]);
+    }
     for (const end of [run.lo, run.hi]) {
       if (end.pc !== pc || Math.hypot(end.v[0], end.v[1]) <= tiny) continue;
       const [hx, hy] = pieceArrow(pc, end.e, E0, E1), S = end === run.lo ? A : B, O = end === run.lo ? B : A, tx = S[0] - hx, ty = S[1] + hy;
@@ -12261,12 +12385,12 @@ document.querySelectorAll('#view-seg button[data-view]').forEach(b => b.addEvent
 }));
 $('#case-sel').addEventListener('change', e => {
   const v = e.target.value;
-  if (v === 'add') { // "+ Add load case…": a new empty case, shown, with its name ready to type in the Load cases tab
+  if (v === 'add') { // "+ Add load case…": a new empty case, shown, with its name ready to type in the Load tab
     const m = st.model;
     commit(() => { const c = { id: newId('case'), name: 'Load case ' + (m.cases.length + 1) }; m.cases.push(c); st.activeCase = c.id; });
     st.tab = 'loads'; renderTabs(); renderPanel();
     const inp = $(`#cn-${st.activeCase}`); if (inp) { inp.focus(); inp.select(); }
-    flash('Load case added. Type a name for it in the Load cases tab.');
+    flash('Load case added. Type a name for it in the Load tab.');
     return;
   }
   st.activeCase = isEnv(v) || v.startsWith('c') ? v : Number(v);
@@ -12300,7 +12424,7 @@ function renderTabs() { document.querySelectorAll('.tabs button').forEach(b => b
 const panel = $('#panel');
 
 function renderPanel() {
-  const fn = { props: panelProps, materials: panelMaterials, sections: panelSections, loads: panelLoads, results: st.view === 'influence' ? panelInfluence : panelResults, elements: panelElements }[st.tab];
+  const fn = { props: panelProps, materials: panelMaterials, sections: panelSections, loads: panelLoads, design: panelDesign, results: st.view === 'influence' ? panelInfluence : panelResults, elements: panelElements }[st.tab];
   // A field of the combinations table left with Tab is saved while the browser moves to the next field: redrawn
   // then, that next field would be gone and the cursor lost. So the redraw waits until the move is done, and then
   // puts the cursor back where it went (the table keeping its scroll).
@@ -12361,7 +12485,7 @@ function panelProps() {
       ${(() => { const back = st.model.members.filter(readsBackwards); return back.length ? `<div class="box"><h3>Member directions</h3>
         <p class="hint">${back.length === 1 ? `Member ${back[0].id} runs` : `Members ${back.map(m => m.id).join(', ')} run`} right to left (or top to bottom), so ${back.length === 1 ? 'its' : 'their'} shear and moment are signed the other way to the rest. Turning ${back.length === 1 ? 'it' : 'them'} round changes no result, only the signs.</p>
         <button class="btn small" id="m-lr-all">→ Point all members left to right</button></div>` : ''; })()}
-      ${panelParams()}`;
+`;
   }
   let h = '';
   if (nodes.length) {
@@ -12400,7 +12524,7 @@ function panelProps() {
         <label for="d-rz">Prescribed rz</label>${qin('d-rz', 'none', L.disp, 'rz')}<span class="unit">rad</span>
       </div>
       <p class="hint">Prescribed displacements act only in directions the support fixes (settlements).</p>
-    </div>${mbs.length ? '' : panelParams()}`;
+    </div>`;
   }
   if (mbs.length) {
     const mb = mbs[0], multi = mbs.length > 1;
@@ -12418,12 +12542,21 @@ function panelProps() {
       <label class="chk"><input type="checkbox" id="m-hi" ${mb.hingeI ? 'checked' : ''}> Hinge at start</label>
       <label class="chk"><input type="checkbox" id="m-hj" ${mb.hingeJ ? 'checked' : ''}> Hinge at end</label>
     </div>
+    ${(() => { // deformation constraints, as Ftool's: flexible (axial, shear) or rigid
+      const ds = mbs.map(x => memberDeform(x)), all = k => ds.every(k), some = k => ds.some(k);
+      const mixed = (k) => some(k) && !all(k) ? ' <span class="hint">(some)</span>' : '';
+      const rigid = all(d => d.rigid), flex = all(d => !d.rigid);
+      return `<div class="box deform"><h3>Deformation constraints</h3>
+      <div class="row"><label class="chk" title="The member bends, and stretches or shears as ticked"><input type="radio" name="m-def" id="m-flex" value="flex" ${flex ? 'checked' : ''}> Flexible member</label></div>
+      <div class="row deform-sub"><label class="chk" title="Axial deformation: the member stretches and shortens under axial force (off: axially rigid, as hand methods assume)"><input type="checkbox" id="m-axial" ${all(d => d.axial) ? 'checked' : ''} ${rigid ? 'disabled' : ''}> Axial deformation${mixed(d => d.axial)}</label>
+        <label class="chk" title="Shear deformation (Timoshenko): adds shear deflection V/(G·As); off: Euler-Bernoulli, as in hand calculations"><input type="checkbox" id="m-shear" ${all(d => d.shear) ? 'checked' : ''} ${rigid ? 'disabled' : ''}> Shear deformation${mixed(d => d.shear)}</label></div>
+      <div class="row"><label class="chk" title="A rigid member neither bends nor stretches (a rigid link): its forces still come out"><input type="radio" name="m-def" id="m-rigid" value="rigid" ${rigid ? 'checked' : ''}> Rigid member</label>
+        ${!rigid && !flex ? '<span class="hint">Some of the selected members are rigid.</span>' : ''}</div></div>`; })()}
     <div class="row"><button class="btn small" id="m-rev" title="Swap the start and end nodes. Hinges and loads stay where they are on the drawing.">⇄ Reverse direction</button>
       ${mbs.some(readsBackwards) ? `<button class="btn small" id="m-lr" title="Turn round the selected members that run right to left (or top to bottom), so every one runs left to right (bottom to top). Results do not change, only the signs of V and M.">→ Point left to right</button>` : ''}
       <span class="hint">${multi ? `Each selected member is turned round.` : `Start node ${mb.i} → end node ${mb.j}`}</span></div>
     ${(() => { const ch = beamChain(st.sel.members); return `<div class="row"><button class="btn small" id="m-beam" ${ch.error ? `disabled title="${esc(ch.error)}"` : 'title="Open the beam solver for the selected member(s)"'}>Beam solver…</button>
       <span class="hint">${ch.error ? (multi ? 'The selected members are not one straight beam.' : '') : multi ? `Solve members ${ch.members.map(o => o.mb.id).join(', ')} as one beam (${fLen(ch.L)}).` : 'Reactions, shear, moment and deflection of this member as a beam.'}</span></div>`; })()}
-    ${steelBox(mbs)}
     <div class="box" data-load="uniform"><h3>Uniform load · ${esc(caseName)}</h3>
       <div class="fields">
         <label for="u-dir">Direction</label>${dirSel('u-dir', u.dir)}<span></span>
@@ -12448,7 +12581,6 @@ function panelProps() {
       </div>
       <p class="hint">"Top" is the left side when looking from the start node to the end node.</p>
     </div>
-    ${panelParams()}
     <button class="btn danger" id="m-del">Delete ${multi ? 'members' : 'member'}</button>`;
   }
   if (dms.length) h += `<p class="hint">${dms.length} dimension line${dms.length > 1 ? 's are' : ' is'} also selected and will be deleted with the selection.</p>`;
@@ -12572,8 +12704,8 @@ panel.addEventListener('change', e => {
   const t = e.target, id = t.id, v = t.type === 'checkbox' ? t.checked : t.value, f = parseFloat(t.value) || 0;
   const nodes = [...st.sel.nodes].map(nodeById).filter(Boolean), mbs = [...st.sel.members].map(memberById).filter(Boolean);
   const caseId = editCaseId();
-  if (st.tab === 'props' && id.startsWith('pr-')) { onParamChange(t, v, f); return; } // the Parameters box
-  if (st.tab === 'props') {
+  if (st.tab === 'loads' && id.startsWith('pr-')) { onParamChange(t, v, f); return; } // the Load parameters box (Load tab)
+  if (st.tab === 'props' || (st.tab === 'design' && id.startsWith('md-'))) {
     // a load field with a formula: check it first, so a mistake changes nothing.
     // A name with no parameter yet gets one (value 1), shown in the Parameters box to set its value.
     let missing = [];
@@ -12605,6 +12737,11 @@ panel.addEventListener('change', e => {
         if (id === 'm-mat') mb.material = v ? Number(v) : null;
         else if (id === 'm-sec') mb.section = v ? Number(v) : null;
         else if (id === 'm-hi') mb.hingeI = v; else if (id === 'm-hj') mb.hingeJ = v;
+        // deformation: a value that is the model's default is not kept, so the member follows the default
+        else if (id === 'm-rigid') mb.rigid = true;
+        else if (id === 'm-flex') delete mb.rigid;
+        else if (id === 'm-axial') { if (v === !st.model.axialRigid) delete mb.axial; else mb.axial = v; }
+        else if (id === 'm-shear') { if (v === !!st.model.shearDef) delete mb.shear; else mb.shear = v; }
         else if (id.startsWith('md-')) { // steel check settings: blank goes back to the default
           const k = id.slice(3), blank = t.value.trim() === '' || !(f > 0);
           mb.design = { ...(mb.design || {}) };
@@ -12634,9 +12771,10 @@ panel.addEventListener('change', e => {
       }
     });
     if (missing.length) {
+      st.tab = 'loads'; renderTabs(); renderPanel(); // its value is set in the Load tab, under Load parameters
       const p = paramByName(missing[0]), inp = p && $(`#pr-val-${p.id}`);
       if (inp) { inp.scrollIntoView({ block: 'nearest' }); inp.focus(); inp.select(); }
-      flash(`Added load parameter${missing.length > 1 ? 's' : ''} ${missing.join(', ')} = 1. Set ${missing.length > 1 ? 'their values' : 'its value'} under Load parameters.`);
+      flash(`Added load parameter${missing.length > 1 ? 's' : ''} ${missing.join(', ')} = 1. Set ${missing.length > 1 ? 'their values' : 'its value'} here, under Load parameters (Load tab).`);
     }
   } else onLibraryChange(t, v, f);
 });
@@ -12920,10 +13058,10 @@ function panelParams() {
   const m = st.model, ps = m.params || [], uses = paramUses();
   return `<div class="box" data-load="params"><div class="row"><h3 style="flex:1">Load parameters</h3><button class="btn small" data-act="par-add">Add</button></div>
   ${ps.length ? `<div class="params">${ps.map(p => paramRow(p, uses)).join('')}</div>
-  <p class="hint">Type a load parameter's name into any load value above (or into the Force, Moment or Distributed load tool's values, in the bar above the drawing), for example <b>${esc(ps[0].name)}</b>, <b>-${esc(ps[0].name)}</b> or <b>1.5*${esc(ps[0].name)} + 2</b>. It takes the unit of that field (${unit('force')} in Fy, ${unit('dist')} in q). Changing the value here updates every load that uses it.</p>`
+  <p class="hint">Type a load parameter's name into any load value in Properties (or into the Force, Moment or Distributed load tool's values, in the bar above the drawing), for example <b>${esc(ps[0].name)}</b>, <b>-${esc(ps[0].name)}</b> or <b>1.5*${esc(ps[0].name)} + 2</b>. It takes the unit of that field (${unit('force')} in Fy, ${unit('dist')} in q). Changing the value here updates every load that uses it.</p>`
   : '<p class="hint">A load parameter is a named number, for example a = 25. Type its name in place of a number in any load value (Fy = -a, q = a/2), or in a load tool\'s values (in the bar above the drawing): it takes that field\'s unit, and every load that uses it follows when you change it here.</p>'}</div>`;
 }
-// The combinations in the Load cases tab: a table (the default), a row each and a column per load case, with every
+// The combinations in the Load tab: a table (the default), a row each and a column per load case, with every
 // factor editable in place (blank: the case is not in it), the envelope tick, Show and delete; or a box each.
 const comboView = () => st.comboView || 'table';
 function comboTableHTML() {
@@ -12957,7 +13095,9 @@ function swSummary() {
   return `<p class="hint">Self-weight in ${on.map(c => esc(c.name)).join(', ')}: the members weigh ${fq('force', W)} in all (γ·A per metre, straight down).
   ${none.length ? `<span style="color:var(--danger)">Member${none.length > 1 ? 's' : ''} ${none.slice(0, 8).join(', ')}${none.length > 8 ? ', …' : ''} weigh${none.length > 1 ? '' : 's'} nothing: ${none.length > 1 ? 'their material has' : 'its material has'} γ = 0 (set it under Materials).</span>` : ''}</p>`;
 }
-function panelLoads() {
+// the Load tab: the load cases, self-weight, the combinations, and at the very bottom the load parameters
+function panelLoads() { return panelLoadCases() + panelParams(); }
+function panelLoadCases() {
   const m = st.model;
   return `<div class="row"><h3 style="flex:1">Load cases</h3><button class="btn small" data-act="case-add">Add case</button></div>
   <div class="list">${m.cases.map(c => `<div class="item ${st.activeCase === c.id ? 'on' : ''}" data-case="${c.id}"><input type="text" id="cn-${c.id}" value="${esc(c.name)}" aria-label="Case name">${swTick(c)}${m.cases.length > 1 ? envTick('c', c.id, c.name) : ''}<button class="btn small danger" data-act="case-del" data-id="${c.id}" ${m.cases.length < 2 ? 'disabled' : ''}>Delete</button></div>`).join('')}</div>
@@ -13106,7 +13246,7 @@ function methodMismatch(sc, m = st.model) {
   const gens = new Set(m.combos.map(c => c.gen).filter(Boolean));
   if (sc.kind !== 'combinations' || gens.size !== 1 || gens.has(sc.method)) return '';
   const other = [...gens][0].toUpperCase();
-  return `The combinations are ${other} ones, but the check is ${sc.method.toUpperCase()}: make the ${sc.method.toUpperCase()} combinations (Load cases → ASCE 7…), or check with ${other}.`;
+  return `The combinations are ${other} ones, but the check is ${sc.method.toUpperCase()}: make the ${sc.method.toUpperCase()} combinations (Load → ASCE 7…), or check with ${other}.`;
 }
 const runsWords = sc => `${sc.runs.length} ${sc.runs.length === 1 ? sc.kind.replace(/s$/, '') : sc.kind}`; // "1 combination", "4 load cases"
 const ratioClass = r => (r > 1 + 1e-9 ? 'r-bad' : r > 0.9 ? 'r-near' : 'r-ok');
@@ -13148,7 +13288,18 @@ function steelReadout(mb) {
   const w = c.res.governs === 'shear' ? c.res.worst.shear : c.res.worst.combined;
   return `Member ${mb.id} · ${c.sec.name}\nratio ${c.res.ratio.toFixed(2)}: ${governsWords(c.res)}\n${c.run}\nat ${fLen(w.x)} from node ${mb.i}\nclick it for its lengths and the working`;
 }
-// the box in a member's Properties: its lengths for the check, and its result
+// The Design tab: design checks, the steel check (AISC 360-22) now, and wood and others to come. With members
+// selected, their lengths for the check and their result; below, every member's ratio, worst first.
+function panelDesign() {
+  const mbs = [...st.sel.members].map(memberById).filter(Boolean);
+  const big = !st.checkCache && st.model.members.length >= BACKGROUND_FROM;
+  return `<h3>Design checks</h3>
+    ${mbs.length ? steelBox(mbs) : '<p class="hint">Select a member (or several) to set its unbraced lengths and factors for the steel check, and to see its ratio.</p>'}
+    <div class="box">${big ? '<div class="row"><h3 style="flex:1">Steel check</h3><button class="btn small" data-act="steel-run">Check now</button></div><p class="hint">On a model this large every member is checked when asked.</p>' : steelResultsPanel()}
+      <p class="hint">The Check view at the top colours each member by its ratio.</p></div>
+    <div class="box"><h3>Wood (NDS)</h3><p class="hint">Wood member checks will come here.</p></div>`;
+}
+// the box in the Design tab for the selected members: their lengths for the check, and their result
 function steelBox(mbs) {
   const mb = mbs[0], multi = mbs.length > 1, chk = steelCheckable(mb);
   if (chk.why && !multi) return `<div class="box"><h3>Steel check</h3><p class="hint">Not checked: ${esc(chk.why)}. The AISC 360 check covers steel I-sections.</p></div>`;
@@ -13188,7 +13339,7 @@ function drawSteelDialog() {
   if (st.checkPick == null || !rows.some(o => o.mb.id === st.checkPick && o.c.res)) st.checkPick = (rows.find(o => o.c.res) || {}).mb ? rows.find(o => o.c.res).mb.id : null;
   const warnUnfactored = sc.kind === 'load cases' && sc.method === 'lrfd';
   $('#check-body').innerHTML = `
-    ${warnUnfactored ? `<p class="note warn">There are no load combinations, so the members are checked under the load cases as they are (unfactored). For LRFD, make the combinations first: Load cases tab → ASCE 7….</p>` : ''}
+    ${warnUnfactored ? `<p class="note warn">There are no load combinations, so the members are checked under the load cases as they are (unfactored). For LRFD, make the combinations first: Load tab → ASCE 7….</p>` : ''}
     ${methodMismatch(sc) ? `<p class="note warn">${esc(methodMismatch(sc))}</p>` : ''}
     ${sc.failed.length ? `<p class="note warn">Not analysed: ${sc.failed.map(esc).join('; ')}</p>` : ''}
     <table class="res"><tr><th class="l">Member</th><th class="l">Section</th><th class="r">L</th><th class="l">Ratio</th><th class="l">Governs</th><th class="l">Under</th></tr>
@@ -13255,7 +13406,7 @@ function steelResultsPanel() {
   const rows = m.members.map(mb => ({ mb, c: sc.members.get(mb.id) })).filter(o => o.c && o.c.res).sort((a, b) => b.c.res.ratio - a.c.res.ratio);
   const skipped = m.members.filter(mb => (sc.members.get(mb.id) || {}).why).length;
   return `<div class="row"><h3 style="flex:1">Steel check · ${sc.method.toUpperCase()}</h3><button class="btn small" data-act="steel-open">Working…</button></div>
-    <p class="hint">AISC 360-22, worst of ${runsWords(sc)}.${sc.kind === 'load cases' && sc.method === 'lrfd' ? ' <span style="color:var(--danger)">These are unfactored: make the combinations first (Load cases → ASCE 7…).</span>' : ''} First-order moments: see the working for what is covered.</p>
+    <p class="hint">AISC 360-22, worst of ${runsWords(sc)}.${sc.kind === 'load cases' && sc.method === 'lrfd' ? ' <span style="color:var(--danger)">These are unfactored: make the combinations first (Load → ASCE 7…).</span>' : ''} First-order moments: see the working for what is covered.</p>
     ${methodMismatch(sc) ? `<p class="hint" style="color:var(--danger)">${esc(methodMismatch(sc))}</p>` : ''}
     ${rows.length ? `<div class="list">${rows.map(({ mb, c }) => `<button class="item" data-act="steel-open" data-id="${mb.id}" style="text-align:left;background:none;font:inherit;color:inherit"><span><b>${mb.id}</b> · ${esc(c.sec.name)} <span class="meta">${esc(governsWords(c.res))}</span></span>${ratioHTML(c.res.ratio)}</button>`).join('')}</div>`
       : '<p class="hint">No member has a steel material and an I-section.</p>'}
@@ -13458,7 +13609,7 @@ function panelResults() {
   <tr><td>Sum</td><td>${F(sum[0])}</td><td>${F(sum[1])}</td><td></td></tr></table></div>
   <h3>Node displacements</h3><div class="tablewrap"><table class="res"><tr><th>Node</th><th>ux ${uD}</th><th>uy ${uD}</th><th>rz rad</th></tr>${disp}</table></div>
   <div class="row"><button class="btn small" data-act="show-steps">Show step-by-step solution</button></div>
-  <p class="hint">Hover a member in the N, V, M or Deformed view to read values at any point. Results are first-order linear elastic, ${st.model.shearDef ? 'with shear deformation (Timoshenko members)' : 'Euler-Bernoulli members (no shear deformation)'}${st.model.axialRigid ? ', axially rigid (members do not stretch or shorten, as in hand calculations)' : ''}.</p>`;
+  <p class="hint">Hover a member in the N, V, M or Deformed view to read values at any point. Results are first-order linear elastic, ${deformSummary() || 'Euler-Bernoulli members (no shear deformation) that stretch and shorten under axial force'}.${deformSummary() ? ' Each member\'s deformation is in Properties ▸ Deformation.' : ''}</p>`;
 }
 // envelope tables: per member the max / min of N, V, M with the governing run, then reactions
 function envelopeTablesHTML(R, wrapCls, tableCls) {
@@ -14043,6 +14194,7 @@ function stepsHTML() {
     <td>${fmtMx(EA / L * F / Lf, 0)}</td><td>${fmtMx(12 * EI / L ** 3 * F / Lf, 0)}</td><td>${fmtMx(6 * EI / L ** 2 * F, 0)}</td><td>${fmtMx(4 * EI / L * F * Lf, 0)}</td><td>${fmtMx(2 * EI / L * F * Lf, 0)}</td></tr></table></div>
     ${e.Phi > 0 ? `<p class="hint">Shear deformation included (Timoshenko): G = ${fmtMx(e.G * F / Lf ** 2, 0)} ${fu}/${lu}², shear area As = ${fmtMx(e.As * Lf ** 2, 0)} ${lu}², Φ = 12EI/(G·As·L²) = ${fmtMx(e.Phi, 1e-12)}.
       The bending terms above become 12EI/(L³(1+Φ)), 6EI/(L²(1+Φ)), (4+Φ)EI/(L(1+Φ)) and (2−Φ)EI/(L(1+Φ)); k′ below uses them.</p>` : ''}
+    ${e.rigid ? `<p class="hint">Rigid member (Properties ▸ Deformation): A and I above are 10 000 times the section's (A = ${fmtMx(e.A0 * Lf ** 2, 0)} ${lu}², I = ${fmtMx(e.I0 * Lf ** 4, 0)} ${lu}⁴), so it neither bends nor stretches; its forces still come out.</p>` : e.axialOn === false ? `<p class="hint">No axial deformation (axially rigid): A above is 10 000 times the section's (${fmtMx(e.A0 * Lf ** 2, 0)} ${lu}²), so the member does not stretch or shorten.</p>` : ''}
     <h4>Local stiffness k′</h4>${mxHTML(LOC, LOC, k0)}
     ${hinges ? `<h4>k′ after releasing the hinge (static condensation)</h4>
       <p class="hint">A hinge means the end moment is zero, so that end's rotation is removed from the member: k′c = k′ − k′ᵣ k′ᵣᵣ⁻¹ k′ᵣᵀ, where r is the released rotation.</p>${mxHTML(LOC, LOC, kp)}` : ''}
@@ -16178,7 +16330,7 @@ function reportHTML() {
   const date = new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
   const o = reportOpts(), on = k => o.parts[k] !== false, runOn = key => !o.skip.includes(String(key));
   let h = `<h1>${esc(m.title || 'TrussFrame model')}</h1>
-  <p class="meta">TrussFrame · 2D frame analysis report · ${esc(date)}<br>Units: ${unitSummary(', ')} · First-order linear-elastic analysis (direct stiffness method), ${st.model.shearDef ? 'Timoshenko members (shear deformation included)' : 'Euler-Bernoulli members'}${st.model.axialRigid ? ', axially rigid' : ''}</p>`;
+  <p class="meta">TrussFrame · 2D frame analysis report · ${esc(date)}<br>Units: ${unitSummary(', ')} · First-order linear-elastic analysis (direct stiffness method), ${deformSummary() || 'Euler-Bernoulli members with axial deformation'}</p>`;
   if (['drawing', 'nodes', 'members', 'materials', 'sections', 'combos'].some(on)) h += '<h2>Model</h2>';
   // drawings in the Model view style, or with the Custom view's layers (falls back to Model when a case cannot be analysed)
   const useCustom = o.drawStyle === 'custom', layerNames = () => LAYERS.filter(([k]) => customLayers()[k]).map(([, l]) => l).join(', ') || 'nothing ticked';
@@ -16396,14 +16548,13 @@ function setDisplayMenu(open) {
     const box = (k, l, inv = false) => `<label class="chk"><input type="checkbox" data-opt="${k}" ${inv ? 'data-invert="1"' : ''} ${!o[k] === inv ? 'checked' : ''}> ${l}</label>`;
     $('#display-menu').innerHTML = `<h4>Display</h4>${THEMES.map(([k, l]) =>
       `<label class="chk"><input type="radio" name="theme" data-theme="${k}" ${k === cur ? 'checked' : ''}> ${l}</label>`).join('')}
-      <h4>Drawing</h4>${box('hideOrigin', 'Show reference axes (x, y at 0,0)', true)}${box('reactionsAll', 'Show reactions on every view')}${box('rxFreeSide', 'Put Rx on the side free of members')}${box('reactText', 'Reactions as values by each support, no arrows')}${box('canvas', 'Draw the model on a canvas (faster on large models)')}${box('cursorLayer', 'Cursor preview on its own layer (smoother mouse on large models)')}
+      <h4>Drawing</h4>${box('hideOrigin', 'Show reference axes (x, y at 0,0)', true)}${box('reactionsAll', 'Show reactions on every view')}${box('rxFreeSide', 'Put Rx on the side free of members')}${box('reactText', 'Reactions as values by each support, no arrows')}
       ${box('hideDims', 'Show dimension lines', true)}${box('nodeIds', 'Show node numbers')}${box('memberIds', 'Show member numbers')}${box('memberDir', 'Show member direction (start → end node)')}${box('matNames', 'Show material names along members')}${box('secNames', 'Show section names along members')}
       ${box('splitForces', 'Split node and point forces into x and y')}${box('distEach', 'Label every piece of a distributed load (one on each member)')}
       ${box('hideFormulas', 'Show load formulas on the drawing (a = 25 kN)', true)}
       <h4>Bending moment values</h4>${box('hideMSign', 'Show the + / − sign', true)}${box('flipM', 'Flip the sign (hogging positive)')}${box('mCompSide', 'Draw on the compression side')}
       <h4>Shear force values</h4>${box('flipV', 'Flip shear sign')}
-      <h4>Analysis (saved with the model)</h4><label class="chk" title="Timoshenko members: adds shear deflection V/(G·As). Off = Euler-Bernoulli, which matches hand calculations."><input type="checkbox" data-model-opt="shearDef" ${st.model && st.model.shearDef ? 'checked' : ''}> Include shear deformation (Timoshenko)</label>
-      <label class="chk" title="Members cannot stretch or shorten, as hand methods assume (slope-deflection, moment distribution, frame formulas). Bending is unchanged. A uniform temperature change in a member held at both ends then gives very large forces."><input type="checkbox" data-model-opt="axialRigid" ${st.model && st.model.axialRigid ? 'checked' : ''}> Axially rigid members (as in hand calculations)</label>`;
+      <p class="hint" style="margin:8px 0 0">Analysis defaults, the touch screen and performance are in Settings (⚙).</p>`;
   }
   $('#display-menu').hidden = !open;
   $('#btn-display').setAttribute('aria-expanded', String(open));
@@ -16411,14 +16562,6 @@ function setDisplayMenu(open) {
 $('#btn-display').addEventListener('click', e => { e.stopPropagation(); setDisplayMenu($('#display-menu').hidden); });
 $('#display-menu').addEventListener('click', e => e.stopPropagation());
 $('#display-menu').addEventListener('change', e => {
-  const mk = e.target.dataset.modelOpt;
-  if (mk) {
-    const on = e.target.checked;
-    commit(() => { if (on) st.model[mk] = true; else delete st.model[mk]; });
-    if (mk === 'shearDef') flash(on ? 'Shear deformation included: members are Timoshenko beams (deflections grow most on short, deep members).' : 'Shear deformation off: Euler-Bernoulli members, as in hand calculations.');
-    if (mk === 'axialRigid') flash(on ? 'Axially rigid members: no member stretches or shortens, as hand calculations assume. Frames move slightly; beams with no axial force do not change.' : 'Axial strain back on: members stretch and shorten under axial force.');
-    return;
-  }
   const k = e.target.dataset.opt;
   if (k) {
     const o = displayOpts(); o[k] = e.target.dataset.invert ? !e.target.checked : e.target.checked;
@@ -16503,6 +16646,48 @@ renderUnits();
 changed();
 requestAnimationFrame(fitView);
 window.FrameStudio = { st, recalc, exportFtl, importFtl, setUnitCfg, UNIT_PRESETS, stepsHTML, reportHTML };
+
+/* ---------------- Settings ---------------- */
+// What is not a way of showing the model: the analysis defaults (saved with the model; each member's own deformation,
+// in Properties, comes first), the touch screen (vibration, the number pad; kept in this browser), the speed of
+// drawing large models (also kept in this browser), and the units.
+function settingsHTML() {
+  const m = st.model, p = appPrefs(), o = displayOpts();
+  const chk = (attr, on, label, title) => `<label class="chk"${title ? ` title="${esc(title)}"` : ''}><input type="checkbox" ${attr} ${on ? 'checked' : ''}> ${label}</label>`;
+  return `<h3>Analysis <span class="hint">(saved with the model)</span></h3>
+    <p class="hint">The deformation members have unless one says otherwise in Properties ▸ Deformation.</p>
+    ${chk('data-set-model="shearDef"', !!m.shearDef, 'Shear deformation (Timoshenko members)', 'Adds shear deflection V/(G·As). Off: Euler-Bernoulli, which matches hand calculations.')}
+    ${chk('data-set-model="axialRigid"', !!m.axialRigid, 'Axially rigid members (no axial deformation)', 'Members cannot stretch or shorten, as hand methods assume (slope-deflection, moment distribution, frame formulas). Bending is unchanged. A uniform temperature change in a member held at both ends then gives very large forces.')}
+    <h3>Touch screen <span class="hint">(this browser)</span></h3>
+    ${chk('data-set-pref="vibrate"', p.vibrate, 'Vibrate on button presses and snaps', 'A short buzz for each button pressed and when a finger catches a node, a member or a grid line')}
+    ${chk('data-set-pref="numpad"', p.numpad, 'Number pad for number boxes', 'Off: the phone\'s own keyboard')}
+    <h3>Performance <span class="hint">(this browser)</span></h3>
+    ${chk('data-set-opt="canvas"', !!o.canvas, 'Draw the model on a canvas (faster on large models)')}
+    ${chk('data-set-opt="cursorLayer"', !!o.cursorLayer, 'Cursor preview on its own layer (smoother mouse on large models)')}
+    <h3>Units</h3>
+    <p><button class="btn" id="set-units">Units &amp; number formatting…</button> <span class="hint">${esc(unitSummary(', '))}</span></p>`;
+}
+function openSettings() { $('#settings-body').innerHTML = settingsHTML(); $('#settings-dlg').hidden = false; $('#settings-close').focus(); }
+const closeSettings = () => { $('#settings-dlg').hidden = true; };
+$('#btn-settings').addEventListener('click', openSettings);
+$('#settings-close').addEventListener('click', closeSettings);
+$('#settings-dlg').addEventListener('click', e => { if (e.target.id === 'settings-dlg') closeSettings(); if (e.target.id === 'set-units') { closeSettings(); openUnits(); } });
+window.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#settings-dlg').hidden) closeSettings(); });
+$('#settings-body').addEventListener('change', e => {
+  const t = e.target, on = t.checked;
+  if (t.dataset.setModel) {
+    const mk = t.dataset.setModel;
+    commit(() => { if (on) st.model[mk] = true; else delete st.model[mk]; });
+    if (mk === 'shearDef') flash(on ? 'Shear deformation is now the default: members are Timoshenko beams unless they say otherwise (deflections grow most on short, deep members).' : 'Shear deformation off by default: Euler-Bernoulli members, as in hand calculations, unless a member says otherwise.');
+    if (mk === 'axialRigid') flash(on ? 'Members are axially rigid by default: they do not stretch or shorten, as hand calculations assume, unless a member says otherwise.' : 'Members stretch and shorten under axial force by default, unless a member says otherwise.');
+    renderPanel(); render();
+  } else if (t.dataset.setPref) setAppPref(t.dataset.setPref, on);
+  else if (t.dataset.setOpt) {
+    const o = displayOpts(); o[t.dataset.setOpt] = on;
+    try { localStorage.setItem('frame-studio-display', JSON.stringify(o)); } catch (err) { /* storage unavailable */ }
+    render();
+  }
+});
 
 </script>
 </body>
