@@ -8006,7 +8006,8 @@ window.addEventListener('resize', () => fitMenus.forEach(menuFit));
 //    angles, forces…), kept in this browser;
 //  - the digits and the point (one point to a number), ± (the sign of the whole value), ⌫ (held: it repeats, and
 //    held on, it clears the box), a ':' in an Angle box for a slope such as 4:12;
-//  - Next (the next box: Length to Angle, x to y), Enter (the box is done: the pad goes), Hide, and ABC (the
+//  - Next (the next box, round from the last to the first), Enter (with both of a member's or a node's boxes typed:
+//    it is drawn and the pad stays for the next; otherwise the box is done and the pad goes), Hide, and ABC (the
 //    phone's keyboard, for that box: a load value can be a formula, such as 1.2*D).
 // The pad types at the end of the box: the phone draws no caret in it (see numpadPrepare), so there is no hidden
 // place in the middle for a key to go. A box that already holds a value is shaded when the pad opens on it: the
@@ -8087,7 +8088,7 @@ function numpadShow(el) {
   numpadEl.querySelector('.np-recent').innerHTML = rec.map(v => `<button type="button" data-np-val="${esc(v)}">${esc(v)}</button>`).join('');
   numpadEl.classList.toggle('colon', el.dataset.mt === 'ang');
   const list = numpadBoxes();
-  numpadEl.querySelector('[data-np="next"]').disabled = list.indexOf(el) >= list.length - 1;
+  numpadEl.querySelector('[data-np="next"]').disabled = list.length < 2; // (Next goes round: from the last box back to the first)
   const wasHidden = numpadEl.hidden;
   numpadEl.hidden = false;
   numpadSize();
@@ -8187,8 +8188,23 @@ numpadEl.addEventListener('click', e => {
     el.dataset.npKeyboard = '1'; el.classList.remove('np-all');
     numpadHide(); numpadPrepare(); // (the box gets its inputmode, type and editing back)
     el.blur(); el.focus();
-  } else if (k === 'next') { numpadRemember(el); numpadCommit(el); const list = numpadBoxes(), i = list.indexOf(el); if (list[i + 1]) list[i + 1].focus(); }
-  else if (k === 'enter') { numpadRemember(el); numpadCommit(el); el.blur(); numpadHide(); } // (the drawing then places what is typed)
+  } else if (k === 'next') { numpadRemember(el); numpadCommit(el); const list = numpadBoxes(), i = list.indexOf(el), to = list[(i + 1) % list.length]; if (to && to !== el) to.focus(); }
+  else if (k === 'enter') {
+    // a member with its Length and Angle both typed (its start point placed), or a node with x and y: drawn at once,
+    // and the pad stays for the next one (the bar empties its boxes and puts the cursor in the first). Otherwise the
+    // box is done and the pad goes, the drawing then placing what is typed.
+    const filled = ids => ids.map(id => document.getElementById(id)).every(b => b && b.value.trim() !== '');
+    const pair = el.dataset.mt ? ['ob-len', 'ob-ang'] : el.dataset.nt ? ['ob-nx', 'ob-ny'] : null;
+    const draw = pair && filled(pair) && (!el.dataset.mt || st.pending != null);
+    if (draw) {
+      for (const id of pair) numpadRemember(document.getElementById(id));
+      numpadCommit(el); numpadOrig = '';
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      const first = document.getElementById(pair[0]);
+      if (first && document.activeElement !== first) first.focus();
+      if (numpadBox(document.activeElement)) numpadShow(document.activeElement); else numpadHide();
+    } else { numpadRemember(el); numpadCommit(el); el.blur(); numpadHide(); }
+  }
   else numpadType(el, k);
 });
 
@@ -8783,21 +8799,12 @@ function ghostDistLoad(g, C, ax, ay, bx, by, opacity = 0.6, mb = null) {
 // the height of the options bar over the top of the drawing (labels keep below it)
 const obTop = () => { const b = document.getElementById('optbar'); return b && !b.hidden ? b.offsetHeight : 0; };
 // small boxed text next to the cursor while drawing or dragging
-// The box of words beside the cursor. It sits up and to the right of the point; near the right edge it slides left
-// just enough to stay inside the drawing (it used to jump to the other side of the point, and back, as the cursor
-// moved about near the edge). Its width is the text's measured width (a guess from the number of letters was too
-// small, so a box near the edge was cut off, or flipped as the numbers in it changed).
 function liveLabel(g, x, y, lines, C) {
   if (!lines.length) return; // nothing to say (an empty box would have no width)
-  const h = lines.length * 15 + 6, rect = el('rect', { rx: 3, height: h, fill: C.sheet, stroke: C.accent, 'stroke-width': 1 });
-  g.appendChild(rect);
-  const texts = lines.map(s => g.appendChild(el('text', { style: 'stroke-width:0' }, s)));
-  let tw = 0;
-  try { tw = Math.max(...texts.map(t => t.getComputedTextLength())); } catch (e) { /* not laid out (off the page) */ }
-  const w = (tw > 0 ? tw : Math.max(...lines.map(s => s.length)) * 7.4) + 12;
-  const { w: vw } = viewSize(), left = Math.max(2, Math.min(x + 14, vw - w - 2)), top = y - 14 - h < obTop() ? y + 14 : y - 14 - h; // never off either edge or under the options bar
-  rect.setAttribute('x', left); rect.setAttribute('y', top); rect.setAttribute('width', w);
-  texts.forEach((t, i) => { t.setAttribute('x', left + 6); t.setAttribute('y', top + 15 + i * 15); });
+  const w =Math.max(...lines.map(s => s.length)) * 6.7 + 12, h = lines.length * 15 + 6;
+  const { w: vw } = viewSize(), left = Math.max(2, x + 14 + w > vw ? x - 14 - w : x + 14), top = y - 14 - h < obTop() ? y + 14 : y - 14 - h; // never off the left edge or under the options bar
+  g.appendChild(el('rect', { x: left, y: top, width: w, height: h, rx: 3, fill: C.sheet, stroke: C.accent, 'stroke-width': 1 }));
+  lines.forEach((s, i) => g.appendChild(el('text', { x: left + 6, y: top + 15 + i * 15, style: 'stroke-width:0' }, s)));
 }
 
 /* ---------------- dimension lines ---------------- */
@@ -10497,7 +10504,9 @@ function distRuns(pieces) {
 const DIST_MIN_PX = 13; // with Scale on, a run is at least this long at its largest value: an arrow then still has a short tail behind its 7 px head
 const DIST_GAP = 20; // px between the arrows of a distributed load, about (evenly spaced along the whole run)
 let distCache = null; // drawLoads: the distributed loads gathered and grouped into runs, for the model as it is
+let distLabStamp = 0; // counts the drawings of the loads: a run's labels are laid out once in each
 function drawLoads(g, C) {
+  const labStamp = ++distLabStamp;
   const cases = factorsFor(st.activeCase);
   const m = st.model, live = !st.fixedSize, hits = [];
   // with Scale on, distributed loads compare against the largest in any case or combination (as forces do)
@@ -10628,27 +10637,21 @@ function drawLoads(g, C) {
   //   The piece on the near side (lower along the run) draws it.
   // - A run with the same load from end to end has one label, over its middle.
   // - With Display ▾ "Label every piece of a distributed load", every piece has its own, over its middle.
-  const eachPiece = !!displayOpts().distEach, distBoxes = []; // distBoxes: where the labels placed so far are, on screen
+  const eachPiece = !!displayOpts().distEach;
   const distLabels = (pc, info) => {
     const run = pc.run, out = [], tiny = 1e-9 * run.qmax;
     const A = toScreen(...run.lo.P), B = toScreen(...run.hi.P);
     // lit when any piece of the run is the load picked (or under the Delete tool)
     const lit = !eachPiece && live ? run.pieces.map(p => p.info).find(i => i && (sameLoadPart(st.hoverLoad, i) || sameLoad(st.focusLoad, i))) : null;
-    // A label that would lie over one already placed moves on, a line at a time, the way `push` points (away
-    // from its load), until it is clear.
-    const put = (x, y, anchor, lab, push) => {
-      // (a little larger than the text is in any browser's font)
-      const w = lab.length * 7.2, box = () => { const x0 = anchor === 'middle' ? x - w / 2 : anchor === 'end' ? x - w : x; return [x0 - 3, y - 14, x0 + w + 3, y + 6]; };
-      let b = box();
-      for (let k = 0; k < 6 && distBoxes.some(o => b[0] < o[2] && o[0] < b[2] && b[1] < o[3] && o[1] < b[3]); k++) { x += push[0] * 20; y += push[1] * 20; b = box(); }
-      distBoxes.push(b);
+    // A label is drawn where it belongs, whether or not it lies over another (as other programs draw them).
+    const put = (x, y, anchor, lab) => {
       g.appendChild(el('text', { x, y, 'text-anchor': anchor, class: 'lbl-load', style: txtStyle(lit || info) }, lab)); out.push(textSeg(x, y, lab, anchor));
     };
     // over the middle of a stretch from screen point P to Q, on the side the load comes from
     const over = (P, Q, v0, v1, off, lab) => {
       let ux = v0[0] + v1[0], uy = -(v0[1] + v1[1]), u = Math.hypot(ux, uy);
       if (u < tiny) { ux = v0[0]; uy = -v0[1]; u = Math.hypot(ux, uy); } // (the two ends cancel out: by the first)
-      put((P[0] + Q[0]) / 2 - ux / (u || 1) * off, (P[1] + Q[1]) / 2 - uy / (u || 1) * off, 'middle', lab, u ? [-ux / u, -uy / u] : [0, -1]);
+      put((P[0] + Q[0]) / 2 - ux / (u || 1) * off, (P[1] + Q[1]) / 2 - uy / (u || 1) * off, 'middle', lab);
     };
     if (eachPiece) {
       const P = toScreen(...pc.P[0]), Q = toScreen(...pc.P[1]);
@@ -10660,34 +10663,57 @@ function drawLoads(g, C) {
       if (run.host === pc) over(A, B, run.lo.v, run.hi.v, lenOf(run, run.qmax) + 12, endText(run.lo.pc, run.lo.e));
       return out;
     }
-    const [E0, E1] = pieceEnds(pc);
-    // where the run turns, at this piece's far end: the slope of its load there differs from the next piece's
+    // The run's labels are laid out together, once per drawing (each is drawn with the piece it belongs to)
+    if (run.labStamp !== labStamp) { run.labStamp = labStamp; run.labs = runLabels(run, A, B, tiny); }
+    for (const q of run.labs) if (q.owner === pc) put(q.x, q.y, q.anchor, q.text);
+    return out;
+  };
+  // A run's labels: one at each end (an end at zero has none) and one where it turns (where two of its loads meet at
+  // the same value but at different slopes: a triangle rising to 40 joined by a partial load falling from 40, say),
+  // beyond the tips of the arrows there. An end's label reads inwards over the load (the left end's starting at the
+  // end, the right end's ending at it); a turn's sits over its point. Where two neighbours would run into each other,
+  // the right one flips to start at its point and run rightwards, and if that is not enough the left one flips to end
+  // at its point; so labels stay by their own arrows. (The arrows lying across the screen, a load on a column: beside
+  // the tip, as they are.)
+  const runLabels = (run, A, B, tiny) => {
     const keyOf = P => Math.round(P[0] * 1e5) + ',' + Math.round(P[1] * 1e5);
     const slope = (p, e) => { const d = run.along(p.P[e]) - run.along(p.P[1 - e]); return d ? [(p.v[e][0] - p.v[1 - e][0]) / d, (p.v[e][1] - p.v[1 - e][1]) / d] : null; };
-    for (const e of [0, 1]) {
+    const items = [];
+    const add = (pc, e, S, kind) => {
+      if (Math.hypot(pc.v[e][0], pc.v[e][1]) <= tiny) return;
+      const [e0, e1] = pieceEnds(pc), [hx, hy] = pieceArrow(pc, e, e0, e1), tx = S[0] - hx, ty = S[1] + hy;
+      if (Math.hypot(hx, hy) < 1e-6) return;
+      const text = endText(pc, e);
+      if (Math.abs(hx) > Math.abs(hy)) { items.push({ owner: pc, x: tx + (hx > 0 ? -5 : 5), y: ty + 4, anchor: hx > 0 ? 'end' : 'start', text, fixed: true }); return; }
+      items.push({ owner: pc, px: tx, x: tx, y: hy < 0 ? ty - 5 : ty + 13, anchor: 'middle', text, kind });
+    };
+    add(run.lo.pc, run.lo.e, A, 'lo');
+    for (const pc of run.pieces) for (const e of [0, 1]) { // the turns
       const P = pc.P[e], k = keyOf(P);
       if (k === keyOf(run.lo.P) || k === keyOf(run.hi.P) || run.along(P) <= run.along(pc.P[1 - e])) continue; // (an end of the run, or the near end)
-      const q = run.pieces.find(o => o !== pc && keyOf(o.P[0]) === k ? true : o !== pc && keyOf(o.P[1]) === k);
-      if (!q || Math.hypot(pc.v[e][0], pc.v[e][1]) <= tiny) continue;
+      const q = run.pieces.find(o => o !== pc && (keyOf(o.P[0]) === k || keyOf(o.P[1]) === k));
+      if (!q) continue;
       const qe = keyOf(q.P[0]) === k ? 0 : 1, s1 = slope(pc, e), s2 = slope(q, qe), span = run.hi.d - run.lo.d || 1;
       if (!s1 || !s2 || Math.hypot(s1[0] - s2[0], s1[1] - s2[1]) * span <= 1e-6 * run.qmax) continue; // (a straight run on: no turn)
-      const [hx, hy] = pieceArrow(pc, e, E0, E1), S = toScreen(...P), tx = S[0] - hx, ty = S[1] + hy;
-      if (Math.hypot(hx, hy) < 1e-6) continue;
-      if (Math.abs(hx) > Math.abs(hy)) put(tx + (hx > 0 ? -5 : 5), ty + 4, hx > 0 ? 'end' : 'start', endText(pc, e), [0, -1]);
-      else put(tx, hy < 0 ? ty - 5 : ty + 13, 'middle', endText(pc, e), [0, hy < 0 ? -1 : 1]);
+      add(pc, e, toScreen(...P), 'turn');
     }
-    for (const end of [run.lo, run.hi]) {
-      if (end.pc !== pc || Math.hypot(end.v[0], end.v[1]) <= tiny) continue;
-      const [hx, hy] = pieceArrow(pc, end.e, E0, E1), S = end === run.lo ? A : B, O = end === run.lo ? B : A, tx = S[0] - hx, ty = S[1] + hy;
-      if (Math.hypot(hx, hy) < 1e-6) continue;
-      // the arrows lie across the screen (a load on a column): beside the tip of the last one. Otherwise beyond the
-      // tip, above or below, aligned to the run's end so that it reads inwards over the load
-      // (pushed clear of another label: along the run and off its end, or further out above or below)
-      const runLen = Math.hypot(S[0] - O[0], S[1] - O[1]) || 1;
-      if (Math.abs(hx) > Math.abs(hy)) put(tx + (hx > 0 ? -5 : 5), ty + 4, hx > 0 ? 'end' : 'start', endText(pc, end.e), [0, (S[1] - O[1]) / runLen < 0 ? -1 : 1]);
-      else put(tx, hy < 0 ? ty - 5 : ty + 13, Math.abs(S[0] - O[0]) < 1 ? 'middle' : S[0] < O[0] ? 'start' : 'end', endText(pc, end.e), [0, hy < 0 ? -1 : 1]);
+    add(run.hi.pc, run.hi.e, B, 'hi');
+    const flat = items.filter(q => !q.fixed);
+    if (Math.abs(A[0] - B[0]) < 1) return items; // (a run straight up the screen: its labels over their points)
+    // left to right on the screen; the ends read inwards to begin with
+    flat.sort((p, q) => p.px - q.px);
+    const set = (q, anchor) => { q.anchor = anchor; q.x = anchor === 'middle' ? q.px : q.px + (anchor === 'start' ? (q.kind === 'turn' ? 4 : 0) : (q.kind === 'turn' ? -4 : 0)); };
+    const outward = (q, anchor) => { q.anchor = anchor; q.x = q.px + (anchor === 'start' ? 4 : -4); };
+    flat.forEach((q, i) => { if (q.kind !== 'turn') set(q, i === 0 ? 'start' : i === flat.length - 1 ? 'end' : 'middle'); });
+    const box = q => { const w = q.text.length * 7.2, x0 = q.anchor === 'middle' ? q.x - w / 2 : q.anchor === 'end' ? q.x - w : q.x; return [x0 - 3, q.y - 14, x0 + w + 3, q.y + 6]; };
+    const clash = (p, q) => { const a = box(p), b = box(q); return a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]; };
+    for (let i = 0; i + 1 < flat.length; i++) {
+      const L = flat[i], R = flat[i + 1];
+      if (!clash(L, R)) continue;
+      outward(R, 'start'); // the right one first: it starts at its point, running rightwards
+      if (clash(L, R)) outward(L, 'end'); // then the left one ends at its point
     }
-    return out;
+    return items;
   };
   if (live) st.loadHits = hits;
   // picked load: accent colour; load under the Delete tool's cursor: red
