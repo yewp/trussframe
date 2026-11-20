@@ -809,7 +809,7 @@ html, body { margin: 0; }
       <button data-view="M" title="Bending moment M"><span class="lg">Moment </span>M</button>
       <button data-view="R" title="Reactions"><span class="lg">Reactions</span><span class="sm">R</span></button>
       <button data-view="influence" title="Influence lines: click a support (reaction) or a point on a member (M, V, N) to see how it changes as a unit load moves across the structure"><span class="lg">Influence</span><span class="sm">IL</span></button>
-      <button data-view="check" title="Steel check (AISC 360-22): each steel I-member coloured by its worst ratio over the combinations (green within, amber over 0.9, red failing)"><span class="pl">Check</span><span class="ps">✓</span></button>
+      <button data-view="check" title="Member check, steel (AISC 360-22) and wood (NDS 2018): each member coloured by its worst ratio over the combinations (green within, amber over 0.9, red failing)"><span class="pl">Check</span><span class="ps">✓</span></button>
     </div>
     <div class="menu" id="custom-menu" hidden></div>
     <div class="menu" id="def-menu" hidden></div>
@@ -920,7 +920,7 @@ html, body { margin: 0; }
         <button data-tab="sections">Sections</button>
         <button data-tab="loads">Load</button>
         <button data-tab="results">Results</button>
-        <button data-tab="design" title="Design checks: steel (AISC 360-22) now, wood and others to come">Design</button>
+        <button data-tab="design" title="Design checks: steel (AISC 360-22) and wood (NDS 2018)">Design</button>
         <button data-tab="elements">Elements</button>
       </div>
       <div class="panel" id="panel"></div>
@@ -998,7 +998,7 @@ html, body { margin: 0; }
 
 <div class="overlay" id="check-dlg" hidden>
   <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="check-title">
-    <div class="dialog-head"><h2 id="check-title">Steel check (AISC 360-22)</h2>
+    <div class="dialog-head"><h2 id="check-title">Member checks</h2>
       <div class="seg" id="check-method" role="group" aria-label="Design method"><button data-v="lrfd" title="Load and resistance factor design: φ × nominal strength">LRFD</button><button data-v="asd" title="Allowable strength design: nominal strength / Ω">ASD</button></div>
       <span class="hint" id="check-what"></span><button class="btn" id="check-close">Close</button></div>
     <div class="dialog-body steel" id="check-body"></div>
@@ -2823,6 +2823,7 @@ if (IS_NODE && require.main === module) {
 </script>
 <script>'use strict';
 // TrussFrame: design helpers.
+//   NDS 2018 checks of rectangular wood members (sawn lumber, glulam, LVL), ASD or LRFD.
 //   ASCE 7-22 load combinations (LRFD §2.3.1 and §2.3.6, ASD §2.4.1 and §2.4.5) from typed load cases.
 //   AISC 360-22 checks of steel I-shape members bent about their strong axis: tension yielding (D2), compression
 //   (E3, with E7 effective widths for slender elements), flexure (F2 yielding and lateral-torsional buckling, F3
@@ -2983,21 +2984,26 @@ if (IS_NODE && require.main === module) {
   // Returns the design strengths and the worst ratios: { ratio, governs, at, ... } (ratio > 1 fails).
   function checkSteelMember(sec, mat, L, stations, design = {}) {
     const p = iShapeProps(sec), Fy = mat.Fy, E = mat.E, asd = design.method === 'asd';
-    const Lb = Math.min(L, design.Lb > 0 ? design.Lb : L), Lx = design.Lx > 0 ? design.Lx : L, Ly = design.Ly > 0 ? design.Ly : Lb;
+    // Lb 0: the compression flange braced along its length (no lateral-torsional buckling); Ly then defaults to L
+    // runL: the member runs straight on through plain joints (no brace there): the whole run is its default length.
+    // A length longer than the member (braces further apart) is kept: the member is one stretch of it
+    const Lrun = design.runL > L ? design.runL : L;
+    const braced = design.Lb === 0, Lb = braced ? 0 : design.Lb > 0 ? design.Lb : Lrun, Lx = design.Lx > 0 ? design.Lx : Lrun, Ly = design.Ly > 0 ? design.Ly : braced ? Lrun : Lb;
     const Kx = design.Kx > 0 ? design.Kx : 1, Ky = design.Ky > 0 ? design.Ky : 1;
     const comp = compression(p, Fy, E, Kx * Lx * 1000, Ky * Ly * 1000);
     const sh = shear(p, Fy, E), PnT = Fy * p.A;
     const f = (phi, omega) => (asd ? 1 / omega : phi); // design strength = f × nominal
     const cap = { Pt: f(0.9, 1.67) * PnT / 1e3, Pc: f(0.9, 1.67) * comp.Pn / 1e3, V: f(sh.phi, sh.omega) * sh.Vn / 1e3, fb: f(0.9, 1.67) };
     // stretches between braces, Lb apart from the start node (the last one may be shorter)
-    const n = Math.max(1, Math.ceil(L / Lb - 1e-9)), segs = [];
+    const one = braced || Lb >= L - 1e-9, n = one ? 1 : Math.ceil(L / Lb - 1e-9), segs = [];
     for (let k = 0; k < n; k++) {
-      const x0 = k * Lb, x1 = Math.min(L, (k + 1) * Lb), len = x1 - x0;
+      const x0 = one ? 0 : k * Lb, x1 = one ? L : Math.min(L, (k + 1) * Lb), len = x1 - x0;
       const inside = stations.filter(s => s.x >= x0 - 1e-9 && s.x <= x1 + 1e-9).map(s => Math.abs(s.M));
       const Mmax = Math.max(Math.abs(momentAt(stations, x0)), Math.abs(momentAt(stations, x1)), ...inside);
       const [MA, MB, MC] = [0.25, 0.5, 0.75].map(t => Math.abs(momentAt(stations, x0 + t * len)));
-      const Cb = design.Cb > 0 ? design.Cb : design.cantilever ? 1 : cbOf(Mmax, MA, MB, MC);
-      const fl = flexure(p, Fy, E, len * 1000, Cb);
+      // (braces further apart than the member: Cb 1, as its moments are only part of the unbraced length's)
+      const Cb = design.Cb > 0 ? design.Cb : design.cantilever || Lb > L + 1e-9 ? 1 : cbOf(Mmax, MA, MB, MC);
+      const fl = flexure(p, Fy, E, braced ? 0 : (one ? Lb : len) * 1000, Cb);
       segs.push({ x0, x1, Mmax, MA, MB, MC, Cb, fl, Mc: cap.fb * fl.Mn / 1e6 });
     }
     // each station: axial, flexure, the H1-1 interaction and shear
@@ -3013,13 +3019,147 @@ if (IS_NODE && require.main === module) {
       if (comb > worst.combined.r) worst.combined = { r: comb, eq: pr >= 0.2 ? 'H1-1a' : 'H1-1b', pr, mr, tension, ...at };
     }
     const governs = worst.shear.r > worst.combined.r ? 'shear' : 'combined';
-    return { props: p, Fy, E, method: asd ? 'asd' : 'lrfd', Lx, Ly, Lb, Kx, Ky, comp, PnT, sh, cap, segs, worst,
+    return { props: p, Fy, E, method: asd ? 'asd' : 'lrfd', Lrun, braced, Lx, Ly, Lb, Kx, Ky, comp, PnT, sh, cap, segs, worst,
       ratio: Math.max(worst.combined.r, worst.shear.r), governs,
       notCovered: segs.some(g => g.fl.webNotCompact) ? `the web is not compact for flexure (h/tw = ${segs[0].fl.lamW.toFixed(1)} > ${segs[0].fl.lpw.toFixed(1)}): AISC F4/F5 are not covered` : null,
       slenderKL: comp.Lc_r > 200 };
   }
 
-  const api = { LOAD_TYPES, guessLoadType, asce7Combos, iShapeProps, compression, flexure, shear, cbOf, momentAt, checkSteelMember };
+  // ---------- NDS 2018 wood members (rectangular sections) ----------
+  // Reference design values (psi) of the wood grades the Materials tab starts from: NDS Supplement Table 4A
+  // (visually graded dimension lumber, 2 to 4 in thick), Table 4B (Southern Pine, whose values are given by width,
+  // the size factor already in them), Table 5A (glulam stress class 24F-1.8E, bending about x, taken as a balanced
+  // layup), and typical values for LVL 2.0E (proprietary: use the maker's). product: sawn, glulam or scl.
+  const PSI = 0.006894757293; // MPa
+  const NDS_GRADES = {
+    'Douglas Fir-Larch No. 2': { product: 'sawn', Fb: 900, Ft: 575, Fv: 180, Fc: 1350, E: 1.6e6, Emin: 580e3 },
+    'Douglas Fir-Larch Select Structural': { product: 'sawn', Fb: 1500, Ft: 1000, Fv: 180, Fc: 1700, E: 1.9e6, Emin: 690e3 },
+    'Spruce-Pine-Fir No. 2': { product: 'sawn', Fb: 875, Ft: 450, Fv: 135, Fc: 1150, E: 1.4e6, Emin: 510e3 },
+    'Southern Pine No. 2': { product: 'sawn', sp: true, Fv: 175, E: 1.4e6, Emin: 510e3,
+      byWidth: [[4, 1100, 675, 1450], [6, 1000, 600, 1400], [8, 925, 550, 1350], [10, 800, 475, 1300], [Infinity, 750, 450, 1250]] }, // [up to nominal width, Fb, Ft, Fc]
+    'Hem-Fir No. 2': { product: 'sawn', Fb: 850, Ft: 525, Fv: 150, Fc: 1300, E: 1.3e6, Emin: 470e3 },
+    'Glulam 24F-1.8E': { product: 'glulam', Fb: 2400, Ft: 1100, Fv: 265, Fc: 1600, E: 1.8e6, Emin: 950e3, EminY: 850e3 }, // (Ex min; Ey min for buckling across the width)
+    'LVL 2.0E': { product: 'scl', Fb: 2600, Ft: 1555, Fv: 285, Fc: 2510, E: 2.0e6, Emin: 1.016e6 },
+  };
+  // a grade's values (MPa) for a member of nominal width w (in; Southern Pine's depend on it)
+  function ndsGradeValues(name, w) {
+    const g = NDS_GRADES[name];
+    if (!g) return null;
+    const v = { product: g.product, sp: !!g.sp, Fv: g.Fv * PSI, E: g.E * PSI, Emin: g.Emin * PSI };
+    if (g.EminY) v.EminY = g.EminY * PSI;
+    if (g.byWidth) { const r = g.byWidth.find(x => (w || 4) <= x[0]); [v.Fb, v.Ft, v.Fc] = r.slice(1).map(x => x * PSI); }
+    else Object.assign(v, { Fb: g.Fb * PSI, Ft: g.Ft * PSI, Fc: g.Fc * PSI });
+    return v;
+  }
+  // The nominal size of sawn lumber from its dressed size (in): 1/2 in off up to 6 in, 3/4 in off from 8 in
+  const nominalIn = a => (a <= 6.25 ? Math.round(a + 0.5) : Math.round(a + 0.75));
+  // Size factor CF of dimension lumber (Table 4A; Southern Pine: Table 4B), by nominal width w and thickness t (in)
+  function sizeFactor(w, t, sp) {
+    if (sp) { const big = w > 12 ? 0.9 : 1; return { Fb: t >= 4 && w >= 8 && w <= 12 ? 1.1 : big, Ft: big, Fc: big }; }
+    const rows = [[4, 1.5, 1.5, 1.5, 1.15], [5, 1.4, 1.4, 1.4, 1.1], [6, 1.3, 1.3, 1.3, 1.1], [8, 1.2, 1.3, 1.2, 1.05], [10, 1.1, 1.2, 1.1, 1.0], [12, 1.0, 1.1, 1.0, 1.0], [Infinity, 0.9, 1.0, 0.9, 0.9]];
+    const r = rows.find(x => w <= x[0]);
+    return { Fb: t >= 4 ? r[2] : r[1], Ft: r[3], Fc: r[4] };
+  }
+  // Flat use factor Cfu of dimension lumber bent about its weak axis (Table 4A), by nominal width and thickness
+  function flatUse(w, t) {
+    const rows = [[3, 1.0, 1.0], [4, 1.1, 1.0], [5, 1.1, 1.05], [8, 1.15, 1.05], [Infinity, 1.2, 1.1]];
+    const r = rows.find(x => w <= x[0]);
+    return t >= 4 ? r[2] : r[1];
+  }
+  // LRFD format conversion KF and resistance factor φ (NDS Table 4.3.1, N.3.1, N.3.2)
+  const LRFD_F = { Fb: [2.54, 0.85], Ft: [2.70, 0.80], Fv: [2.88, 0.75], Fc: [2.40, 0.90], Emin: [1.76, 0.85] };
+  // Wet service factor CM (Tables 4A, 5A); sawn Fb and Fc keep 1.0 when small (Fb·CF ≤ 1150 psi, Fc·CF ≤ 750 psi)
+  const WET = { sawn: { Fb: 0.85, Ft: 1.0, Fv: 0.97, Fc: 0.8, Emin: 0.9 }, glulam: { Fb: 0.8, Ft: 0.8, Fv: 0.875, Fc: 0.73, Emin: 0.833 } };
+  // Beam stability effective length (Table 3.3.3, "loading conditions not specified": single spans and cantilevers)
+  const beamLe = (lu, d) => (lu / d < 7 ? 2.06 * lu : lu / d <= 14.3 ? 1.63 * lu + 3 * d : 1.84 * lu);
+  // the column (3.7-1) and beam (3.3-6) stability factors, from the ratio of the buckling to the crushing value
+  const stab = (a, c) => (1 + a) / (2 * c) - Math.sqrt(((1 + a) / (2 * c)) ** 2 - a / c);
+
+  // sec: { b, h } mm (h the depth in the frame's plane); wood: { product 'sawn' | 'glulam' | 'scl', sp (Southern
+  // Pine), Fb, Ft, Fv, Fc, Emin (MPa: reference values), nominal { w, t } (in: sawn lumber), timber (5 in and
+  // thicker) }; L (m); stations as for steel. design: { method, time (ASD: the load duration factor CD; LRFD: the
+  // time effect factor λ), wet, rep (repetitive members: Cr = 1.15), Lb (m, between lateral supports of the
+  // compression edge; default L), Lx, Ly (m, between supports against buckling in and out of the frame's plane;
+  // default L and Lb), Kx, Ky (effective length factors Ke, default 1), cantilever }.
+  function checkWoodMember(sec, wood, L, stations, design = {}) {
+    const IN = 25.4, b = sec.b, h = sec.h, A = b * h, S = b * h * h / 6, lrfd = design.method === 'lrfd', P = wood.product;
+    const time = design.time > 0 ? design.time : lrfd ? 0.8 : 1.0, wet = !!design.wet, notes = [];
+    // lu 0: the compression edge braced along its length (sheathing, decking): CL = 1; ly then defaults to L
+    // (runL: the whole straight run the member is part of, its default length; lengths longer than the member are kept)
+    const Lrun = (design.runL > L ? design.runL : L) * 1000, braced = design.Lb === 0, Lb = braced ? 0 : design.Lb > 0 ? design.Lb * 1000 : Lrun;
+    const Lx = design.Lx > 0 ? design.Lx * 1000 : Lrun, Ly = design.Ly > 0 ? design.Ly * 1000 : braced ? Lrun : Lb, Kx = design.Kx > 0 ? design.Kx : 1, Ky = design.Ky > 0 ? design.Ky : 1;
+    // the format factors on every value (LRFD: KF φ λ; ASD: CD, but not on Emin)
+    const fmt = k => (lrfd ? LRFD_F[k][0] * LRFD_F[k][1] * (k === 'Emin' ? 1 : time) : k === 'Emin' ? 1 : time);
+    // size: CF (sawn dimension lumber), (12/d)^(1/9) on Fb (timbers deeper than 12 in), the depth factor of SCL
+    let CF = { Fb: 1, Ft: 1, Fc: 1 }, Cfu = 1;
+    const flat = b > h + 1e-6;
+    if (P === 'sawn' && !wood.timber && wood.nominal) { CF = sizeFactor(wood.nominal.w, wood.nominal.t, wood.sp); if (flat) Cfu = flatUse(wood.nominal.w, wood.nominal.t); }
+    if (P === 'sawn' && wood.timber && h / IN > 12) CF.Fb = (12 / (h / IN)) ** (1 / 9);
+    if (P === 'scl') CF.Fb = Math.min(1.18, (12 / (h / IN)) ** 0.136);
+    // wet service
+    const W = P === 'sawn' ? WET.sawn : WET.glulam, CM = { Fb: 1, Ft: 1, Fv: 1, Fc: 1, Emin: 1 };
+    if (wet) {
+      if (P === 'scl') notes.push('LVL and other SCL are for dry service only: the wet service factors are the maker\'s');
+      Object.assign(CM, W);
+      if (P === 'sawn' && wood.Fb * CF.Fb <= 1150 * PSI) CM.Fb = 1;
+      if (P === 'sawn' && wood.Fc * CF.Fc <= 750 * PSI) CM.Fc = 1;
+    }
+    // repetitive members: 1.15 for dimension lumber (Table 4A), 1.04 for SCL (NDS 8.3.7); none for glulam or timbers
+    const Cr = design.rep && P !== 'glulam' && !wood.timber ? (P === 'scl' ? 1.04 : 1.15) : 1;
+    // Emin about the strong axis (buckling across the depth) and the weak one (across the width, and lateral
+    // buckling of a beam): glulam has a lower Ey min; sawn lumber and SCL one value
+    const Emin = wood.Emin * CM.Emin * fmt('Emin'), EminY = (wood.EminY || wood.Emin) * CM.Emin * fmt('Emin');
+    // bending: Fb* (all factors but CL and, for glulam, CV), beam stability CL, glulam volume factor CV
+    const FbStar = wood.Fb * fmt('Fb') * CM.Fb * CF.Fb * Cfu * Cr;
+    const d = flat ? b : h, w = flat ? h : b; // the depth and width bending is resisted across
+    let CL = 1, RB = 0, FbE = Infinity, le = 0;
+    if (!flat && !braced && h > b + 1e-6) { le = beamLe(Lb, h); RB = Math.sqrt(le * h / (b * b)); FbE = 1.20 * EminY / (RB * RB); CL = stab(FbE / FbStar, 0.95); }
+    let CV = 1;
+    if (P === 'glulam') { const x = wood.sp ? 20 : 10, Lft = (design.cantilever ? 2 : 1) * Lrun / 1000 / 0.3048; CV = Math.min(1, ((21 / Lft) * (12 / (d / IN)) * (5.125 / (w / IN))) ** (1 / x)); }
+    const Fb = P === 'glulam' ? FbStar * Math.min(CL, CV) : FbStar * CL;
+    const FbStarT = P === 'glulam' ? FbStar * CV : FbStar; // 3.9.1: Fb* has every factor but CL
+    const FbStar2 = FbStar * CL; // 3.9.1: Fb** has every factor but CV
+    // tension, shear
+    const Ft = wood.Ft * fmt('Ft') * CM.Ft * CF.Ft, Fv = wood.Fv * fmt('Fv') * CM.Fv;
+    // compression: column stability CP, about the frame's plane (depth h) and out of it (width b)
+    const sx = Kx * Lx / h, sy = Ky * Ly / b, sl = Math.max(sx, sy), c = P === 'sawn' ? 0.8 : 0.9;
+    const FcE1 = 0.822 * Emin / (sx * sx), FcE2 = 0.822 * EminY / (sy * sy); // in the plane, and out of it
+    const FcStar = wood.Fc * fmt('Fc') * CM.Fc * CF.Fc, FcE = Math.min(FcE1, FcE2), CP = stab(FcE / FcStar, c), Fc = FcStar * CP;
+    if (sl > 50) notes.push(`le/d = ${sl.toFixed(1)} is over 50, the limit in NDS 3.7.1.4`);
+    if (RB > 50) notes.push(`RB = ${RB.toFixed(1)} is over 50, the limit in NDS 3.3.3.7`);
+    if (flat && P !== 'sawn') notes.push('bending about the weak axis of glulam or SCL: its own reference values (Fby) apply');
+    const worst = { axial: { r: 0 }, bending: { r: 0 }, shear: { r: 0 }, combined: { r: 0 } };
+    let buckles = false;
+    for (const s of stations) {
+      const f = Math.abs(s.N) * 1e3 / A, fb = Math.abs(s.M) * 1e6 / S, fv = 1.5 * Math.abs(s.V) * 1e3 / A, tension = s.N >= 0;
+      const at = { x: s.x, N: s.N, V: s.V, M: s.M, f, fb, fv, tension };
+      const ra = f / (tension ? Ft : Fc), rb = fb / Fb, rv = fv / Fv;
+      let rc, eq;
+      if (tension) { // 3.9-1 and 3.9-2
+        const r1 = f / Ft + fb / FbStarT, r2 = fb > f ? (fb - f) / FbStar2 : 0;
+        rc = Math.max(r1, r2); eq = r1 >= r2 ? '3.9-1' : '3.9-2';
+      } else { // 3.9-3, and 3.9-4 for buckling out of the plane with bending in it
+        // fc at or past FcE1, the member buckles in the plane: 3.9-3 has no answer, and fc/Fc' (over 1 then) stands
+        const r3 = f >= FcE1 ? f / Fc : (f / Fc) ** 2 + fb / (Fb * (1 - f / FcE1));
+        if (f >= FcE1 && fb > 1e-9) buckles = true;
+        const r4 = fb > 0 && f > 0 && FbE < Infinity ? f / FcE2 + (fb / FbE) ** 2 : 0;
+        rc = Math.max(r3, r4); eq = r3 >= r4 ? '3.9-3' : '3.9-4';
+      }
+      if (ra > worst.axial.r) worst.axial = { r: ra, ...at };
+      if (rb > worst.bending.r) worst.bending = { r: rb, ...at };
+      if (rv > worst.shear.r) worst.shear = { r: rv, ...at };
+      const rAll = Math.max(rc, ra); // (fb/Fb′ alone is 3.9-2 with no tension, and is inside 3.9-3)
+      if (rAll > worst.combined.r) worst.combined = { r: rAll, eq: f > 1e-9 && fb > 1e-9 ? eq : null, buckles, ra, rb, ...at };
+      buckles = false;
+    }
+    const governs = worst.shear.r > worst.combined.r ? 'shear' : 'combined';
+    return { method: lrfd ? 'lrfd' : 'asd', product: P, time, wet, b, h, A, S, braced, Lrun: Lrun / 1000, Lb: Lb / 1000, Lx: Lx / 1000, Ly: Ly / 1000, Kx, Ky,
+      ref: wood, CF, Cfu, CM, Cr, CL, CV, RB, le: le / 1000, FbE, FbStar, Fb, Ft, Fv, Fc, FcStar, FcE, FcE1, FcE2, CP, c, sx, sy, Emin, EminY,
+      worst, governs, ratio: Math.max(worst.combined.r, worst.shear.r), notes };
+  }
+
+  const api = { LOAD_TYPES, guessLoadType, asce7Combos, iShapeProps, compression, flexure, shear, cbOf, momentAt, checkSteelMember,
+    PSI, NDS_GRADES, LRFD_F, ndsGradeValues, nominalIn, sizeFactor, flatUse, beamLe, checkWoodMember };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Design = api;
 })(typeof window !== 'undefined' ? window : globalThis);
@@ -6123,6 +6263,7 @@ function dimsToMetres(s) {
   return out;
 }
 function factorsFor(active, m = st.model) {
+  if (Array.isArray(active)) return active; // [[case, factor], …]: a combination made for the checks (none saved)
   if (typeof active === 'string' && active.startsWith('c')) {
     const c = m.combos.find(x => 'c' + x.id === active);
     return c ? c.terms.filter(t => t.factor).map(t => [t.case, t.factor]) : [];
@@ -12740,6 +12881,14 @@ panel.addEventListener('change', e => {
   const nodes = [...st.sel.nodes].map(nodeById).filter(Boolean), mbs = [...st.sel.members].map(memberById).filter(Boolean);
   const caseId = editCaseId();
   if (st.tab === 'loads' && id.startsWith('pr-')) { onParamChange(t, v, f); return; } // the Load parameters box (Load tab)
+  if (id === 'df-on' || id === 'df-live' || id === 'df-total') { // deflection: on or off, and the limits (blank: the defaults)
+    commit(() => { const d = { ...(st.model.design || {}) };
+      if (id === 'df-on') { if (v) delete d.deflOff; else d.deflOff = true; }
+      else { const k = id === 'df-live' ? 'deflLive' : 'deflTotal'; if (f > 0) d[k] = f; else delete d[k]; }
+      st.model.design = d; });
+    return;
+  }
+  if (id === 'wd-wet') { commit(() => { const d = { ...(st.model.design || {}) }; if (v) d.wet = true; else delete d.wet; st.model.design = d; }); return; } // wood: wet service, for every member
   if (st.tab === 'props' || (st.tab === 'design' && id.startsWith('md-'))) {
     // a load field with a formula: check it first, so a mistake changes nothing.
     // A name with no parameter yet gets one (value 1), shown in the Parameters box to set its value.
@@ -12777,8 +12926,11 @@ panel.addEventListener('change', e => {
         else if (id === 'm-flex') delete mb.rigid;
         else if (id === 'm-axial') { if (v === !st.model.axialRigid) delete mb.axial; else mb.axial = v; }
         else if (id === 'm-shear') { if (v === !!st.model.shearDef) delete mb.shear; else mb.shear = v; }
-        else if (id.startsWith('md-')) { // steel check settings: blank goes back to the default
-          const k = id.slice(3), blank = t.value.trim() === '' || !(f > 0);
+        else if (id === 'md-braced') { mb.design = { ...(mb.design || {}) }; if (v) mb.design.Lb = 0; else delete mb.design.Lb; if (!Object.keys(mb.design).length) delete mb.design; }
+        else if (id === 'md-defl') { if (v === '') continue; mb.design = { ...(mb.design || {}) }; if (v === 'on' || v === 'off') mb.design.defl = v; else delete mb.design.defl; if (!Object.keys(mb.design).length) delete mb.design; }
+        else if (id === 'md-rep') { mb.design = { ...(mb.design || {}) }; if (v) mb.design.rep = true; else delete mb.design.rep; if (!Object.keys(mb.design).length) delete mb.design; }
+        else if (id.startsWith('md-')) { // steel and wood check settings: blank goes back to the default
+          const k = id.slice(3), blank = t.value.trim() === '' || !(f > 0 || (k === 'Lb' && f === 0 && /^\s*0*\.?0*\s*$/.test(t.value)));
           mb.design = { ...(mb.design || {}) };
           if (blank) delete mb.design[k]; else mb.design[k] = ['Lb', 'Lx', 'Ly'].includes(k) ? fromU('len', f) : f;
           if (!Object.keys(mb.design).length) delete mb.design;
@@ -12854,7 +13006,7 @@ st.libSel = { materials: null, sections: null };
 // a wood grade (WOOD_GRADES, "US:0") as material values: its name, E, unit weight, thermal expansion along the grain
 function woodGrade(key) {
   const [r, i] = key.split(':'), g = WOOD_GRADES[r] && WOOD_GRADES[r][+i];
-  return g ? { name: g[0], kind: 'wood', E: g[1], gamma: g[2], alpha: WOOD_ALPHA, nu: 0.3 } : {};
+  return g ? { name: g[0], grade: g[0], kind: 'wood', E: g[1], gamma: g[2], alpha: WOOD_ALPHA, nu: 0.3 } : {};
 }
 function panelMaterials() {
   const m = st.model, cur = m.materials.find(x => x.id === st.libSel.materials) || m.materials[0];
@@ -12868,11 +13020,24 @@ function panelMaterials() {
     ${cur.kind === 'wood' ? `<label for="mt-grade" title="Fills in E, unit weight and thermal expansion with typical values for that grade">Grade</label><select id="mt-grade"><option value="">Start from a grade…</option>${['US', 'EU'].map(r => `<optgroup label="${r === 'US' ? 'North America (NDS)' : 'Europe (EN 338, EN 14080)'}">${WOOD_GRADES[r].map(([n], i) => `<option value="${r}:${i}">${esc(n)}</option>`).join('')}</optgroup>`).join('')}</select><span></span>` : ''}
     <label for="mt-E">E</label>${num('mt-E', uv('stress', cur.E))}<span class="unit">${unit('stress')}</span>
     ${cur.kind === 'steel' ? `<label for="mt-Fy" title="Yield strength, for the steel check (AISC 360) and the beam solver's stress check">Fy</label><input type="number" id="mt-Fy" step="any" min="0" value="${cur.Fy > 0 ? uv('stress', cur.Fy) : ''}" placeholder="${uv('stress', defaultLimitStress({ ...cur, Fy: 0 }))} from the name"><span class="unit">${unit('stress')}</span>` : ''}
+    ${cur.kind === 'wood' ? woodValueFields(cur) : ''}
     <label for="mt-nu">ν</label>${num('mt-nu', cur.nu)}<span></span>
     <label for="mt-gamma">γ</label>${num('mt-gamma', uv('weight', cur.gamma))}<span class="unit">${unit('weight')}</span>
     <label for="mt-alpha">α</label>${num('mt-alpha', uv('alpha', cur.alpha))}<span class="unit">${unit('alpha')}</span>
   </div>
   <div class="row"><button class="btn small" data-act="mat-assign">Assign to selected members</button><button class="btn small danger" data-act="mat-del">Delete</button></div></div>` : ''}`;
+}
+// a wood material's NDS reference design values: each blank takes the grade's (shown greyed)
+function woodValueFields(mat) {
+  const gName = woodGradeName(mat), g = gName && Design.NDS_GRADES[gName], set = mat.wd || {};
+  const ph = k => {
+    if (k === 'Emin') return g ? wv(g.Emin * Design.PSI * mat.E / (g.E * Design.PSI)) + ' grade' : 'from E';
+    if (!g) return 'needed';
+    if (g.byWidth) return 'by width';
+    return wv(g[k] * Design.PSI) + ' grade';
+  };
+  return `<span class="hint" style="grid-column:1/-1">NDS design values${g ? ' (blank: the grade\'s)' : ': set them for the wood check'}</span>`
+    + WOOD_VALS.map(([k, tip]) => `<label for="mw-${k}" title="${tip}: the reference design value (NDS Supplement), before adjustment">${k === 'Emin' ? 'E<sub>min</sub>' : `F<sub>${k[1]}</sub>`}</label><input type="number" id="mw-${k}" step="any" min="0" value="${set[k] > 0 ? wv(set[k]) : ''}" placeholder="${ph(k)}"><span class="unit">${woodStress().u}</span>`).join('');
 }
 function panelSections() {
   const m = st.model, cur = m.sections.find(x => x.id === st.libSel.sections) || m.sections[0];
@@ -13255,26 +13420,200 @@ function runsOnPast(mb, m = st.model) {
   }
   return out;
 }
+/* ---- NDS wood checks ---- */
+// A member with a wood material and a rectangular section is checked to NDS 2018 (design.js). Its reference values
+// come from the material's grade (NDS Supplement; Southern Pine by the member's width), or from values set under
+// Materials (blank: the grade's). Emin, when neither gives it, comes from E (NDS Appendix D: COV 0.25 for sawn
+// lumber, 0.10 for glulam and SCL).
+// wood design values are shown in psi with US units (ksi otherwise, as for steel), else in the stress unit
+const woodStress = () => (unit('stress') === 'ksi' ? { u: 'psi', k: 1 / Design.PSI } : { u: unit('stress'), k: toU('stress', 1) });
+const wv = x => +(x * woodStress().k).toPrecision(6);
+const WOOD_VALS = [['Fb', 'Bending'], ['Ft', 'Tension along the grain'], ['Fv', 'Shear'], ['Fc', 'Compression along the grain'], ['Emin', 'Modulus of elasticity for stability']];
+const woodGradeName = mat => (mat.grade && Design.NDS_GRADES[mat.grade] ? mat.grade : Object.keys(Design.NDS_GRADES).find(k => (mat.name || '').startsWith(k)) || null);
+const WOOD_PRODUCT = { GLU: 'glulam', 'GL-EU': 'glulam', LUM: 'sawn', TIM: 'sawn', 'C-EU': 'sawn' };
+function woodCheckable(mb, m = st.model) {
+  const mat = m.materials.find(x => x.id === mb.material), sec = m.sections.find(x => x.id === mb.section);
+  if (!mat) return { why: 'no material' };
+  if (!sec || sec.type !== 'rectangle') return { why: sec ? `${sec.name} is not a rectangle (the wood check covers rectangular sections)` : 'no section' };
+  const gName = woodGradeName(mat), IN = 25.4, d = sec.dims;
+  // sawn lumber's nominal size: from the table (2x10), or from the dressed size
+  let nominal = null;
+  const cat = sec.cat && (sec.cat.type === 'LUM' || sec.cat.type === 'TIM') && /^(\d+)x(\d+)$/.exec(sec.cat.us || '');
+  if (cat) nominal = { t: +cat[1], w: +cat[2] };
+  const g0 = gName ? Design.NDS_GRADES[gName] : null;
+  const product = (g0 && g0.product) || (mat.wd && mat.wd.product) || (sec.cat && WOOD_PRODUCT[sec.cat.type]) || 'sawn';
+  if (!nominal && product === 'sawn') { const a = Math.min(d.b, d.h) / IN, c = Math.max(d.b, d.h) / IN; nominal = { t: Design.nominalIn(a), w: Design.nominalIn(c) }; }
+  const g = gName ? Design.ndsGradeValues(gName, nominal && nominal.w) : null, set = mat.wd || {};
+  const timber = product === 'sawn' && nominal && nominal.t >= 5;
+  const vals = { product, sp: !!(g && g.sp) || /southern pine/i.test(mat.name || ''), timber, nominal }, from = {};
+  for (const [k] of WOOD_VALS) {
+    if (set[k] > 0) { vals[k] = set[k]; from[k] = 'set'; }
+    else if (g && !(timber && k !== 'Emin')) { vals[k] = k === 'Emin' ? g.Emin * mat.E / g.E : g[k]; from[k] = 'grade'; }
+    else if (k === 'Emin') { vals.Emin = mat.E * (product === 'sawn' ? 0.3655 : 0.518); from.Emin = 'E'; }
+  }
+  if (g && g.EminY && from.Emin === 'grade') vals.EminY = g.EminY * mat.E / g.E; // (glulam: Ey min, for buckling across the width)
+  const missing = WOOD_VALS.map(([k]) => k).filter(k => !(vals[k] > 0));
+  if (missing.length) return { why: timber && g ? `timbers (5 in and thicker) have their own design values (NDS Supplement Table 4D): set ${missing.join(', ')} under Materials` : `${mat.name} has no NDS design values: set ${missing.join(', ')} under Materials` };
+  return { mat, sec, vals, from, grade: gName };
+}
+// the load duration (ASD: CD, NDS Table 2.3.2) or time effect factor (LRFD: λ, Table N3) of a combination or load
+// case, from the types of its loads: the shortest duration load in it governs. A case without a type is taken as
+// occupancy live load.
+const WOOD_CD = { D: 0.9, L: 1.0, S: 1.15, R: 1.15, Lr: 1.25, W: 1.6, E: 1.6 };
+function woodTime(key, method, m = st.model) {
+  const combo = typeof key === 'string' && key[0] === 'c' ? m.combos.find(c => 'c' + c.id === key) : null;
+  const ids = combo ? combo.terms.filter(t => t.factor).map(t => t.case) : Array.isArray(key) ? key.filter(t => t[1]).map(t => t[0]) : [key];
+  const types = ids.map(id => m.cases.find(c => c.id === id)).filter(Boolean).map(c => (c.type != null ? c.type : guessLoadType(c.name)) || 'L');
+  if (!types.length) return { f: method === 'lrfd' ? 0.8 : 1.0, types };
+  if (method === 'lrfd') return { f: types.some(t => t === 'W' || t === 'E') ? 1.0 : types.every(t => t === 'D') ? 0.6 : 0.8, types };
+  return { f: Math.max(...types.map(t => WOOD_CD[t] || 1.0)), types };
+}
+const woodWet = (m = st.model) => !!(m.design && m.design.wet);
+// the check a member gets: steel (AISC 360) or wood (NDS), or why it gets none
+function memberCheckable(mb, m = st.model) {
+  const mat = m.materials.find(x => x.id === mb.material);
+  if (mat && mat.kind === 'wood') { const c = woodCheckable(mb, m); return c.why ? c : { ...c, wood: true }; }
+  if (mat && mat.kind !== 'steel') return { why: `${mat.name} is ${mat.kind}: steel and wood members are checked` };
+  return steelCheckable(mb, m);
+}
 function checkRuns(m = st.model) {
   const combos = envelopeRuns('env', m);
-  return combos.length ? { runs: combos, kind: 'combinations' } : { runs: m.cases.map(c => ({ key: c.id, name: c.name })), kind: 'load cases' };
+  if (combos.length) return { runs: combos, kind: 'combinations' };
+  // no combinations: each case alone, and the ASCE 7-22 ASD combinations from the cases' types (a case with no type
+  // counts as live load), so dead and live load act together and each wind direction is taken on its own
+  const runs = m.cases.map(c => ({ key: c.id, name: c.name }));
+  if (m.cases.length < 2) return { runs, kind: 'load cases', nCases: runs.length, gen: 0 };
+  const types = Object.fromEntries(m.cases.map(c => [c.id, (c.type != null ? c.type : guessLoadType(c.name)) || 'L']));
+  const gen = asce7Combos(m.cases, types, 'asd', {}).filter(g => !(g.terms.length === 1 && g.terms[0].factor === 1)); // (a case alone is there already)
+  for (const g of gen) runs.push({ key: g.terms.map(t => [t.case, t.factor]), name: g.name });
+  return { runs, kind: 'load cases', nCases: m.cases.length, gen: gen.length };
 }
 function steelChecks() {
   if (st.checkCache) return st.checkCache;
   const m = st.model, method = steelMethod(m), { runs, kind } = checkRuns(m), members = new Map(), failed = [];
-  for (const mb of m.members) { const c = steelCheckable(mb, m); if (c.why) members.set(mb.id, { why: c.why }); }
-  if (m.members.length && m.nodes.length) for (const run of runs) {
+  const able = new Map(m.members.map(mb => [mb.id, memberCheckable(mb, m)]));
+  // the straight run each member is part of: its lengths default to the whole run (a plain joint is no brace)
+  const runsBy = new Map(), runLen = mb => { if (!runsBy.has(mb.id)) { const r = straightRun(mb, m); for (const x of r.members) runsBy.set(x.id, r); } const r = runsBy.get(mb.id); return r.members.length > 1 ? r.L : undefined; };
+  for (const mb of m.members) { const c = able.get(mb.id); if (c.why) members.set(mb.id, { why: c.why }); }
+  if (m.members.length && m.nodes.length && [...able.values()].some(c => !c.why)) for (const run of runs) {
     let r;
     try { r = analyzeFor(run.key); } catch (e) { failed.push(`${run.name}: ${e.message}`); continue; }
+    const time = woodTime(run.key, method, m);
     for (const mb of m.members) {
-      const c = steelCheckable(mb, m), sts = r.stations.get(mb.id);
+      const c = able.get(mb.id), sts = r.stations.get(mb.id);
       if (c.why || !sts) continue;
-      const res = Design.checkSteelMember(c.sec.dims, { E: c.mat.E, Fy: c.Fy }, memberFrame(mb).L, sts, { ...(mb.design || {}), method, cantilever: isCantilever(mb, m) });
-      const cur = members.get(mb.id);
-      if (!cur || res.ratio > cur.res.ratio) members.set(mb.id, { res, run: run.name, fyFrom: c.fyFrom, mat: c.mat, sec: c.sec, past: runsOnPast(mb, m) });
+      let res, cur = members.get(mb.id);
+      const runL = runLen(mb);
+      if (c.wood) {
+        res = Design.checkWoodMember(c.sec.dims, c.vals, memberFrame(mb).L, sts, { ...(mb.design || {}), runL, method, time: time.f, wet: woodWet(m), cantilever: isCantilever(mb, m) });
+        if (!cur || res.ratio > cur.res.ratio) members.set(mb.id, { wood: true, res, run: run.name, types: time.types, mat: c.mat, sec: c.sec, from: c.from, grade: c.grade, past: runsOnPast(mb, m), runIds: runsBy.get(mb.id).members.map(x => x.id) });
+        continue;
+      }
+      res = Design.checkSteelMember(c.sec.dims, { E: c.mat.E, Fy: c.Fy }, memberFrame(mb).L, sts, { ...(mb.design || {}), runL, method, cantilever: isCantilever(mb, m) });
+      if (!cur || res.ratio > cur.res.ratio) members.set(mb.id, { res, run: run.name, fyFrom: c.fyFrom, mat: c.mat, sec: c.sec, past: runsOnPast(mb, m), runIds: runsBy.get(mb.id).members.map(x => x.id) });
     }
   }
-  return (st.checkCache = { method, kind, runs: runs.map(r => r.name), members, failed });
+  if (deflLimits(m).on && [...members.values()].some(c => c.res)) addDeflections(m, members);
+  const cr = checkRuns(m);
+  return (st.checkCache = { method, kind, nCases: cr.nCases, gen: cr.gen || 0, runs: runs.map(r => r.name), members, failed });
+}
+/* ---- deflection ---- */
+// The limits (span / n) and whether deflection is checked, kept with the model's design settings
+const deflLimits = (m = st.model) => { const d = m.design || {}; return { on: d.deflOff !== true, live: d.deflLive > 0 ? d.deflLive : 360, total: d.deflTotal > 0 ? d.deflTotal : 240 }; };
+// creep for wood (NDS 3.5.2): the dead (long-term) deflection is multiplied by Kcr, 1.5 dry and 2.0 wet
+const creepK = (c, m = st.model) => (c.wood ? (woodWet(m) ? 2.0 : 1.5) : 1.0);
+// The straight run a member belongs to: on through plain joints (no support, one other member in line), to the
+// supports or joints at its ends, so a beam split at its load points is measured over its whole span
+function straightRun(mb, m = st.model) {
+  const plain = id => { const n = m.nodes.find(x => x.id === id), sp = (n && n.support) || {}; return sp.x === 'free' && sp.y === 'free' && sp.r === 'free'; };
+  const next = (from, node) => {
+    if (!plain(node)) return null;
+    const others = m.members.filter(x => x !== from && (x.i === node || x.j === node));
+    if (others.length !== 1) return null;
+    const f = memberFrame(from), o = memberFrame(others[0]);
+    return Math.abs(f.c * o.s - f.s * o.c) < 0.02 ? others[0] : null;
+  };
+  const list = [mb], seen = new Set([mb.id]), walk = (node, add) => {
+    let cur = mb;
+    for (;;) { const o = next(cur, node); if (!o || seen.has(o.id)) return node; seen.add(o.id); add(o); node = o.i === node ? o.j : o.i; cur = o; }
+  };
+  const endB = walk(mb.j, o => list.push(o)), endA = walk(mb.i, o => list.unshift(o));
+  const A = nodeById(endA), B = nodeById(endB), L = Math.hypot(B.x - A.x, B.y - A.y) || 1, e = [(B.x - A.x) / L, (B.y - A.y) / L];
+  const free = id => plain(id) && m.members.filter(x => x.i === id || x.j === id).length === 1;
+  return { members: list, A, B, L, e, n: [-e[1], e[0]], freeA: free(endA), freeB: free(endB) };
+}
+// Each member's deflection setting (Design tab): 'on' (Check), 'off' (Don't check), or none (Auto). A run takes
+// Check if any of its members has it, else Don't check if any has that, else Auto: not steeper than 60°.
+const deflMode = list => { const ks = list.map(x => (x.design || {}).defl); return ks.includes('on') ? 'on' : ks.includes('off') ? 'off' : 'auto'; };
+const deflAuto = run => Math.abs(run.e[1]) <= Math.sin(Math.PI / 3);
+function addDeflections(m, members) {
+  const lim = deflLimits(m), typeOf = c => (c.type != null ? c.type : guessLoadType(c.name)) || 'L';
+  const Ds = m.cases.filter(c => typeOf(c) === 'D'), others = m.cases.filter(c => !['D', 'W', 'E'].includes(typeOf(c))); // (wind and earthquake have limits of their own)
+  const per = new Map();
+  for (const c of m.cases) { try { per.set(c.id, analyzeFor(c.id).stations); } catch (e) { /* (the strength check reports it) */ } }
+  const done = new Set();
+  for (const mb of m.members) {
+    const c0 = members.get(mb.id);
+    if (!c0 || !c0.res || done.has(mb.id)) continue;
+    const run = straightRun(mb, m);
+    for (const x of run.members) done.add(x.id);
+    if (run.freeA && run.freeB) continue;
+    // set by hand in the Design tab (for the whole run: Check wins), or by default only beams and rafters: a column
+    // or a stud (steeper than 60°) has no deflection limit here
+    const mode = deflMode(run.members);
+    if (mode === 'off' || (mode === 'auto' && !deflAuto(run))) continue;
+    // each case's displacement across the run at every station (stations share positions across cases)
+    const field = id => {
+      const S = per.get(id), pts = [];
+      if (!S) return null;
+      for (const x of run.members) {
+        const sts = S.get(x.id), f = memberFrame(x);
+        if (!sts) return null;
+        for (const p of sts) {
+          const gx = f.c * p.u - f.s * p.v, gy = f.s * p.u + f.c * p.v, px = f.a.x + f.c * p.x - run.A.x, py = f.a.y + f.s * p.x - run.A.y;
+          pts.push({ t: px * run.e[0] + py * run.e[1], w: gx * run.n[0] + gy * run.n[1] });
+        }
+      }
+      return pts;
+    };
+    const fields = new Map(m.cases.map(cs => [cs.id, field(cs.id)]));
+    if ([...fields.values()].some(f => !f)) continue;
+    const ref = fields.get(m.cases[0].id), ts = ref.map(p => p.t);
+    const i0 = ts.indexOf(Math.min(...ts)), i1 = ts.indexOf(Math.max(...ts)), cant = run.freeA || run.freeB, Lchk = cant ? 2 * run.L : run.L;
+    // relative to the chord between the run's ends, or for a cantilever to its root
+    const rel = f => f.map((p, k) => p.w - (cant ? f[run.freeA ? i1 : i0].w : f[i0].w + (f[i1].w - f[i0].w) * (p.t - ts[i0]) / ((ts[i1] - ts[i0]) || 1)));
+    const zero = ts.map(() => 0), dD = Ds.reduce((acc, cs) => acc.map((v, k) => v + rel(fields.get(cs.id))[k]), zero);
+    const dO = others.map(cs => ({ cs, d: rel(fields.get(cs.id)) }));
+    const peak = arr => arr.reduce((b, v, k) => (Math.abs(v) > b.d ? { d: Math.abs(v), t: ts[k] - ts[i0] } : b), { d: 0, t: 0 });
+    for (const x of run.members) {
+      const c = members.get(x.id);
+      if (!c || !c.res) continue;
+      const Kcr = creepK(c, m);
+      let live = { d: 0, t: 0, case: null }, total = { ...peak(dD.map(v => Kcr * v)), case: null };
+      for (const { cs, d } of dO) {
+        const pl = peak(d); if (pl.d > live.d) live = { ...pl, case: cs.name };
+        const pt = peak(d.map((v, k) => Kcr * dD[k] + v)); if (pt.d > total.d) total = { ...pt, case: cs.name };
+      }
+      const rL = live.d / (Lchk / lim.live), rT = total.d / (Lchk / lim.total);
+      const defl = { live, total, Kcr, Lchk, cant, run: run.members.map(y => y.id), runL: run.L, from: run.A.id, lim, hasD: Ds.length > 0, forced: mode === 'on', ratio: Math.max(rL, rT), which: rL >= rT ? 'live' : 'total' };
+      c.res.defl = defl;
+      c.res.strength = c.res.ratio;
+      if (defl.ratio > c.res.ratio) { c.res.ratio = defl.ratio; c.res.governs = 'deflection'; }
+    }
+  }
+}
+// the deflection lines of a member's working
+function deflWorking(r) {
+  const d = r.defl;
+  if (!d) return '';
+  const D = x => fq('disp', x), Lq = x => fLen(x), n = x => (x > 1e-12 ? ` (L/${Math.round(d.Lchk / x)})` : '');
+  return `<h3>Deflection (service loads)</h3>
+  <div class="eqs">
+    Over ${d.run.length > 1 ? `members ${d.run.join(', ')} in line` : `member ${d.run[0]}`}: L = ${d.cant ? `2 × ${Lq(d.runL)} (cantilever) = ` : ''}${Lq(d.Lchk)}, measured from ${d.cant ? 'the root' : 'the chord between its ends'}${d.forced ? ' (checked as set in the Design tab)' : ''}<br>
+    Live (each gravity load case other than dead load, alone): Δ = ${D(d.live.d)}${n(d.live.d)}${d.live.case ? ` under ${esc(d.live.case)}, ${Lq(d.live.t)} from node ${d.from}` : ''} ≤ L/${d.lim.live} = ${D(d.Lchk / d.lim.live)} → ratio ${(d.live.d / (d.Lchk / d.lim.live)).toFixed(3)}<br>
+    Total (${d.Kcr !== 1 ? `K<sub>cr</sub> ${d.Kcr} × ` : ''}dead load${d.live.case || d.total.case ? ' + each other case' : ''}): Δ = ${D(d.total.d)}${n(d.total.d)} ≤ L/${d.lim.total} = ${D(d.Lchk / d.lim.total)} → ratio ${(d.total.d / (d.Lchk / d.lim.total)).toFixed(3)}
+    ${d.hasD ? '' : '<br><span class="hint">No load case is dead load (D): give the cases their types under Load → ASCE 7… so the total takes them.</span>'}
+  </div>`;
 }
 // a warning when the combinations were made for the other method (LRFD loads against ASD strengths, or back)
 function methodMismatch(sc, m = st.model) {
@@ -13283,12 +13622,21 @@ function methodMismatch(sc, m = st.model) {
   const other = [...gens][0].toUpperCase();
   return `The combinations are ${other} ones, but the check is ${sc.method.toUpperCase()}: make the ${sc.method.toUpperCase()} combinations (Load → ASCE 7…), or check with ${other}.`;
 }
-const runsWords = sc => `${sc.runs.length} ${sc.runs.length === 1 ? sc.kind.replace(/s$/, '') : sc.kind}`; // "1 combination", "4 load cases"
+const runsWords = sc => { const n = sc.kind === 'load cases' ? sc.nCases : sc.runs.length; return `${n} ${n === 1 ? sc.kind.replace(/s$/, '') : sc.kind}${sc.gen ? `, alone and in ${sc.gen} ASCE 7 ASD combination${sc.gen > 1 ? 's' : ''} of them` : ''}`; }; // "1 combination", "3 load cases, alone and in 4 ASCE 7 ASD combinations of them"
 const ratioClass = r => (r > 1 + 1e-9 ? 'r-bad' : r > 0.9 ? 'r-near' : 'r-ok');
 const ratioColor = (r, C) => (r > 1 + 1e-9 ? C.del : r > 0.9 ? css('--near') : css('--ok'));
 const ratioHTML = r => `<span class="ratio ${ratioClass(r)}"><i><b style="width:${Math.min(100, r * 100).toFixed(0)}%;background:currentColor"></b></i>${r.toFixed(2)}</span>`;
 // what governs, in words
 function governsWords(res) {
+  if (res.governs === 'deflection') return `deflection (${res.defl.which}, L/${res.defl.lim[res.defl.which]})`;
+  if (res.product) { // wood
+    const w = res.worst.combined;
+    if (res.governs === 'shear') return 'shear (fv ≤ Fv′)';
+    if (w.buckles) return 'compression and bending: buckles in the plane (fc ≥ FcE1)';
+    if (w.eq) return `${w.tension ? 'tension' : 'compression'} and bending (NDS ${w.eq})`;
+    if (w.ra >= w.rb) return w.tension ? 'tension (ft ≤ Ft′)' : `compression (fc ≤ Fc′${res.CP < 0.999 ? ', buckling' : ''})`;
+    return `bending (fb ≤ Fb′${res.CL < 0.999 ? ', lateral stability' : ''})`;
+  }
   if (res.governs === 'shear') return 'shear (G2)';
   const w = res.worst.combined, seg = w.seg;
   if (w.pr > 0.02 && w.mr < 0.02) return w.tension ? 'tension (D2)' : `compression (E3, buckling about ${res.comp.axis})`;
@@ -13311,51 +13659,110 @@ function drawSteelCheck(g, C) {
 function steelLegend() {
   const sc = steelChecks(), done = [...sc.members.values()].filter(c => c.res), n = st.model.members.length;
   if (!n) return '';
-  if (!done.length) return 'Steel check: no member has a steel material and an I-section.';
+  if (!done.length) return 'Member check: no member is steel with an I-section, or wood with a rectangular section.';
   const worst = Math.max(...done.map(c => c.res.ratio)), fails = done.filter(c => c.res.ratio > 1 + 1e-9).length;
-  return `Steel check, AISC 360-22 ${sc.method.toUpperCase()}: worst of ${runsWords(sc)}${sc.kind === 'load cases' && sc.method === 'lrfd' ? ' (unfactored: add combinations)' : ''} · `
+  const codes = [done.some(c => !c.wood) && 'AISC 360-22', done.some(c => c.wood) && 'NDS 2018'].filter(Boolean).join(' and ');
+  return `${done.some(c => !c.wood) ? (done.some(c => c.wood) ? 'Steel and wood check' : 'Steel check') : 'Wood check'}, ${codes} ${sc.method.toUpperCase()}: worst of ${runsWords(sc)}${sc.kind === 'load cases' && sc.method === 'lrfd' ? ' (unfactored: add combinations)' : ''} · `
     + `largest ratio ${worst.toFixed(2)}${fails ? ` · ${fails} failing` : ''} · green ≤ 0.90, amber ≤ 1.00, red over · dashed: not checked`;
 }
 function steelReadout(mb) {
   const c = steelChecks().members.get(mb.id);
   if (!c) return '';
   if (c.why) return `Member ${mb.id}: not checked (${c.why})`;
-  const w = c.res.governs === 'shear' ? c.res.worst.shear : c.res.worst.combined;
-  return `Member ${mb.id} · ${c.sec.name}\nratio ${c.res.ratio.toFixed(2)}: ${governsWords(c.res)}\n${c.run}\nat ${fLen(w.x)} from node ${mb.i}\nclick it for its lengths and the working`;
+  const w = c.res.governs === 'shear' ? c.res.worst.shear : c.res.worst.combined, dfl = c.res.governs === 'deflection';
+  return `Member ${mb.id} · ${c.sec.name}\nratio ${c.res.ratio.toFixed(2)}: ${governsWords(c.res)}\n${dfl ? (c.res.defl[c.res.defl.which].case || 'dead load') : c.run}\n${dfl ? `${fq('disp', c.res.defl[c.res.defl.which].d)}, ${fLen(c.res.defl[c.res.defl.which].t)} from node ${c.res.defl.from}` : `at ${fLen(w.x)} from node ${mb.i}`}\nclick it for its lengths and the working`;
 }
 // The Design tab: design checks, the steel check (AISC 360-22) now, and wood and others to come. With members
 // selected, their lengths for the check and their result; below, every member's ratio, worst first.
 function panelDesign() {
   const mbs = [...st.sel.members].map(memberById).filter(Boolean);
   const big = !st.checkCache && st.model.members.length >= BACKGROUND_FROM;
+  const isWood = mb => { const mat = st.model.materials.find(x => x.id === mb.material); return !!mat && mat.kind === 'wood'; };
+  const askNow = name => `<div class="row"><h3 style="flex:1">${name}</h3><button class="btn small" data-act="steel-run">Check now</button></div><p class="hint">On a model this large every member is checked when asked.</p>`;
   return `<h3>Design checks</h3>
-    ${mbs.length ? steelBox(mbs) : '<p class="hint">Select a member (or several) to set its unbraced lengths and factors for the steel check, and to see its ratio.</p>'}
-    <div class="box">${big ? '<div class="row"><h3 style="flex:1">Steel check</h3><button class="btn small" data-act="steel-run">Check now</button></div><p class="hint">On a model this large every member is checked when asked.</p>' : steelResultsPanel()}
+    ${mbs.length ? (mbs.some(isWood) ? woodBox(mbs.filter(isWood)) : '') + (mbs.some(x => !isWood(x)) ? steelBox(mbs.filter(x => !isWood(x))) : '') : '<p class="hint">Select a member (or several) to set its unbraced lengths and factors for the steel or wood check, and to see its ratio.</p>'}
+    <div class="box">${big ? askNow('Steel check') : steelResultsPanel(true)}
       <p class="hint">The Check view at the top colours each member by its ratio.</p></div>
-    <div class="box"><h3>Wood (NDS)</h3><p class="hint">Wood member checks will come here.</p></div>`;
+    <div class="box">${big ? askNow('Wood check (NDS 2018)') : woodResultsPanel()}
+      <label class="chk" title="Moisture content over 19% in use (sawn lumber), or 16% (glulam): the wet service factors CM"><input type="checkbox" id="wd-wet" ${woodWet() ? 'checked' : ''}> Wet service (CM)</label></div>
+    ${deflBox()}`;
+}
+// the deflection limits, for every checked member
+function deflBox() {
+  const lim = deflLimits(), mbs = [...st.sel.members].map(memberById).filter(Boolean);
+  // the selected members' setting: Auto (by slope), Check or Don't check; blank when they differ
+  const cur = ['auto', 'on', 'off'].find(k => mbs.length && mbs.every(x => ((x.design || {}).defl || 'auto') === k)) || '';
+  const autoWord = mbs.length === 1 ? (deflAuto(straightRun(mbs[0])) ? 'checked: a beam' : 'not checked: steeper than 60°') : 'by slope';
+  const pick = mbs.length ? `<label for="md-defl" title="Auto: beams and rafters (not steeper than 60°) are checked, columns and studs are not. Check or Don't check overrides it for a sloped brace, a leaning column that carries a beam, and so on. A member in a straight run with others sets the whole run (Check wins).">${mbs.length > 1 ? 'Selected' : 'Member ' + mbs[0].id}</label><select id="md-defl">${cur ? '' : '<option value="" selected>(differ)</option>'}${opt('auto', 'Auto (' + autoWord + ')', cur)}${opt('on', 'Check', cur)}${opt('off', 'Don\'t check', cur)}</select><span></span>` : '';
+  return `<div class="box"><h3>Deflection</h3>
+    <label class="chk" title="Service loads: each gravity load case unfactored, over the straight run of members between supports or joints"><input type="checkbox" id="df-on" ${lim.on ? 'checked' : ''}> Check deflection of steel and wood beams</label>
+    ${lim.on ? `<div class="fields">
+      <label for="df-live" title="Each load case other than dead load, alone">Live</label><div class="row" style="gap:4px">L / <input type="number" id="df-live" min="1" step="any" value="${lim.live}" style="flex:1"></div><span></span>
+      <label for="df-total" title="Dead load (times Kcr for wood: 1.5 dry, 2.0 wet) plus each other load case">Total</label><div class="row" style="gap:4px">L / <input type="number" id="df-total" min="1" step="any" value="${lim.total}" style="flex:1"></div><span></span>
+      ${pick}
+    </div>
+    <p class="hint">Beams and rafters (not steeper than 60°) unless set for the selected members, under the unfactored load cases by their type (Load → ASCE 7…): wind and earthquake are left out; wood's dead load deflection × K<sub>cr</sub> 1.5 (2.0 wet) for creep. A cantilever takes L = 2 × its length.</p>` : ''}
+  </div>`;
+}
+// the box in the Design tab for the selected wood members: their lengths for the check, and their result
+function woodBox(mbs) {
+  const mb = mbs[0], multi = mbs.length > 1, chk = woodCheckable(mb);
+  if (chk.why && !multi) return `<div class="box"><h3>Wood check (NDS 2018)</h3><p class="hint">Not checked: ${esc(chk.why)}.</p></div>`;
+  const d = mb.design || {}, same = k => mbs.every(x => ((x.design || {})[k] == null ? null : x.design[k]) === (d[k] == null ? null : d[k]));
+  const braced = mbs.every(x => (x.design || {}).Lb === 0);
+  const lenIn = (k, lab, ph, tip) => `<label for="md-${k}" title="${tip}">${lab}</label><input type="number" id="md-${k}" step="any" min="0" value="${same(k) && d[k] >= 0 && d[k] != null ? uv('len', d[k]) : ''}" placeholder="${ph}" title="${tip}"><span class="unit">${unit('len')}</span>`;
+  const numIn = (k, lab, ph, tip) => `<label for="md-${k}" title="${tip}">${lab}</label><input type="number" id="md-${k}" step="any" min="0" value="${same(k) && d[k] > 0 ? d[k] : ''}" placeholder="${ph}" title="${tip}"><span></span>`;
+  const ask = !multi && !st.checkCache && st.model.members.length >= BACKGROUND_FROM;
+  const c = !multi && !ask && steelChecks().members.get(mb.id);
+  const past = !multi && runsOnPast(mb), run = straightRun(mb), dflt = !multi && run.members.length > 1 ? `run ${fLen(run.L)}` : 'member length';
+  return `<div class="box"><h3>Wood check (NDS 2018)</h3>
+    <div class="fields">
+      ${lenIn('Lb', 'l<sub>u</sub>', dflt, 'Laterally unsupported length of the compression edge, for beam stability (CL). Blank: the member length, or the whole straight run it is part of; 0: braced along its length.')}
+      ${lenIn('Lx', 'l<sub>x</sub>', dflt, 'Unbraced length for column buckling in the frame\'s plane (across the depth). Blank: the member length, or the whole straight run.')}
+      ${lenIn('Ly', 'l<sub>y</sub>', braced ? dflt : '= lu', 'Unbraced length for column buckling out of the frame\'s plane (across the width). Blank: the same as lu (the member length when lu is 0).')}
+      ${numIn('Kx', 'K<sub>e,x</sub>', '1', 'Buckling length coefficient in the plane (NDS Appendix G). Blank: 1 (pinned ends).')}
+      ${numIn('Ky', 'K<sub>e,y</sub>', '1', 'Buckling length coefficient out of the plane. Blank: 1.')}
+    </div>
+    <label class="chk" title="Sheathing, decking or blocking holds the compression edge all along: lu = 0, so CL = 1 (no lateral buckling)"><input type="checkbox" id="md-braced" ${braced ? 'checked' : ''}> Compression edge braced along its length</label>
+    <label class="chk" title="Three or more joists, rafters or studs no more than 24 in apart, joined by a floor, roof or other load-sharing element: Cr = 1.15 on Fb (sawn lumber and SCL)"><input type="checkbox" id="md-rep" ${mbs.every(x => (x.design || {}).rep) ? 'checked' : ''}> Repetitive member (Cr = 1.15)</label>
+    ${past && past.length ? `<p class="hint">This member runs straight on past node ${past.join(' and ')}, which is not a brace, so its lengths are those of the whole run (members ${run.members.map(x => x.id).join(', ')}, ${fLen(run.L)}) unless set. If it is braced in between, set them.</p>` : ''}
+    ${ask ? '<div class="row"><span class="hint" style="flex:1">On a model this large the ratio is worked out when asked.</span><button class="btn small" data-act="steel-run">Check now</button></div>' : ''}
+    ${c && c.res ? `<div class="row"><span>Ratio ${ratioHTML(c.res.ratio)}</span><span class="hint">${esc(governsWords(c.res))} · ${esc(c.run)}</span><button class="btn small" data-act="steel-open" data-id="${mb.id}">Working…</button></div>` : multi ? '<p class="hint">These lengths are set for every selected wood member.</p>' : ''}
+  </div>`;
+}
+// every wood member's ratio, worst first; a row opens its working
+function woodResultsPanel() {
+  const sc = steelChecks(), m = st.model;
+  const rows = m.members.map(mb => ({ mb, c: sc.members.get(mb.id) })).filter(o => o.c && o.c.res && o.c.wood).sort((a, b) => b.c.res.ratio - a.c.res.ratio);
+  const notes = m.members.map(mb => ({ mb, c: sc.members.get(mb.id), mat: m.materials.find(x => x.id === mb.material) })).filter(o => o.c && o.c.why && o.mat && o.mat.kind === 'wood');
+  return `<div class="row"><h3 style="flex:1">Wood check (NDS 2018) · ${sc.method.toUpperCase()}</h3>${rows.length ? '<button class="btn small" data-act="steel-open" data-wood="1">Working…</button>' : ''}</div>
+    ${rows.length ? `<p class="hint">Worst of ${runsWords(sc)}, each with its load duration (${sc.method === 'lrfd' ? 'λ' : 'C<sub>D</sub>'}) from the types of its loads.${sc.kind === 'load cases' && sc.method === 'lrfd' ? ' <span style="color:var(--danger)">These are unfactored: make the combinations first (Load → ASCE 7…).</span>' : ''}</p>
+      <div class="list">${rows.map(({ mb, c }) => `<button class="item" data-act="steel-open" data-id="${mb.id}" style="text-align:left;background:none;font:inherit;color:inherit"><span><b>${mb.id}</b> · ${esc(c.sec.name)} <span class="meta">${esc(governsWords(c.res))}</span></span>${ratioHTML(c.res.ratio)}</button>`).join('')}</div>`
+      : notes.length ? '' : '<p class="hint">No member is wood with a rectangular section. Give a member a wood material (Materials: Type wood, and a grade) and a rectangular or table wood section.</p>'}
+    ${notes.length ? `<p class="hint">Not checked: ${notes.map(o => `member ${o.mb.id} (${esc(o.c.why)})`).join('; ')}.</p>` : ''}`;
 }
 // the box in the Design tab for the selected members: their lengths for the check, and their result
 function steelBox(mbs) {
   const mb = mbs[0], multi = mbs.length > 1, chk = steelCheckable(mb);
   if (chk.why && !multi) return `<div class="box"><h3>Steel check</h3><p class="hint">Not checked: ${esc(chk.why)}. The AISC 360 check covers steel I-sections.</p></div>`;
-  const d = mb.design || {}, same = k => mbs.every(x => ((x.design || {})[k] || null) === (d[k] || null));
-  const lenIn = (k, ph, tip) => `<label for="md-${k}" title="${tip}">${k[0]}<sub>${k.slice(1)}</sub></label><input type="number" id="md-${k}" step="any" min="0" value="${same(k) && d[k] > 0 ? uv('len', d[k]) : ''}" placeholder="${ph}" title="${tip}"><span class="unit">${unit('len')}</span>`;
+  const d = mb.design || {}, same = k => mbs.every(x => ((x.design || {})[k] == null ? null : x.design[k]) === (d[k] == null ? null : d[k]));
+  const lenIn = (k, ph, tip) => `<label for="md-${k}" title="${tip}">${k[0]}<sub>${k.slice(1)}</sub></label><input type="number" id="md-${k}" step="any" min="0" value="${same(k) && d[k] != null && d[k] >= 0 ? uv('len', d[k]) : ''}" placeholder="${ph}" title="${tip}"><span class="unit">${unit('len')}</span>`;
   const numIn = (k, ph, tip) => `<label for="md-${k}" title="${tip}">${k[0]}<sub>${k.slice(1)}</sub></label><input type="number" id="md-${k}" step="any" min="0" value="${same(k) && d[k] > 0 ? d[k] : ''}" placeholder="${ph}" title="${tip}"><span></span>`;
   // a large model is not checked again after every change just to show one member's ratio here (the check
   // analyses the whole model for every combination): it is worked out when asked, or when the Check view is opened
   const ask = !multi && !st.checkCache && st.model.members.length >= BACKGROUND_FROM;
   const c = !multi && !ask && steelChecks().members.get(mb.id);
-  const past = !multi && runsOnPast(mb);
+  const past = !multi && runsOnPast(mb), run = straightRun(mb), dflt = !multi && run.members.length > 1 ? `run ${fLen(run.L)}` : 'member length';
   return `<div class="box"><h3>Steel check (AISC 360-22)</h3>
     <div class="fields">
-      ${lenIn('Lb', 'member length', 'Unbraced length for lateral-torsional buckling: the distance between braces of the compression flange. Blank: the member length.')}
-      ${lenIn('Ly', '= Lb', 'Unbraced length for column buckling about the weak (y) axis. Blank: the same as Lb.')}
-      ${lenIn('Lx', 'member length', 'Unbraced length for column buckling about the strong (x) axis. Blank: the member length.')}
+      ${lenIn('Lb', dflt, 'Unbraced length for lateral-torsional buckling: the distance between braces of the compression flange. Blank: the member length, or the whole straight run it is part of; 0: braced along its length (a deck, say).')}
+      ${lenIn('Ly', mbs.every(x => (x.design || {}).Lb === 0) ? dflt : '= Lb', 'Unbraced length for column buckling about the weak (y) axis. Blank: the same as Lb (with Lb 0, the member or run length).')}
+      ${lenIn('Lx', dflt, 'Unbraced length for column buckling about the strong (x) axis. Blank: the member length, or the whole straight run.')}
       ${numIn('Ky', '1', 'Effective length factor about y. Blank: 1 (pinned ends).')}
       ${numIn('Kx', '1', 'Effective length factor about x. Blank: 1.')}
       ${numIn('Cb', 'from moments', 'Lateral-torsional buckling factor. Blank: worked out from the moment diagram between braces (1 for a cantilever).')}
     </div>
-    ${past && past.length ? `<p class="hint" style="color:var(--danger)">This member runs straight on past node ${past.join(' and ')}, which is not a support: a node is not a brace. If the braces are further apart, set the lengths to the real distances.</p>` : ''}
+    ${past && past.length ? `<p class="hint">This member runs straight on past node ${past.join(' and ')}, which is not a brace, so its lengths are those of the whole run (members ${run.members.map(x => x.id).join(', ')}, ${fLen(run.L)}) unless set. If it is braced in between, set them.</p>` : ''}
     ${ask ? '<div class="row"><span class="hint" style="flex:1">On a model this large the ratio is worked out when asked.</span><button class="btn small" data-act="steel-run">Check now</button></div>' : ''}
     ${c && c.res ? `<div class="row"><span>Ratio ${ratioHTML(c.res.ratio)}</span><span class="hint">${esc(governsWords(c.res))} · ${esc(c.run)}</span><button class="btn small" data-act="steel-open" data-id="${mb.id}">Working…</button></div>` : multi ? '<p class="hint">These lengths are set for every selected member.</p>' : ''}
   </div>`;
@@ -13374,18 +13781,19 @@ function drawSteelDialog() {
   if (st.checkPick == null || !rows.some(o => o.mb.id === st.checkPick && o.c.res)) st.checkPick = (rows.find(o => o.c.res) || {}).mb ? rows.find(o => o.c.res).mb.id : null;
   const warnUnfactored = sc.kind === 'load cases' && sc.method === 'lrfd';
   $('#check-body').innerHTML = `
-    ${warnUnfactored ? `<p class="note warn">There are no load combinations, so the members are checked under the load cases as they are (unfactored). For LRFD, make the combinations first: Load tab → ASCE 7….</p>` : ''}
+    ${sc.kind === 'load cases' ? `<p class="note warn">There are no load combinations, so the members are checked under each load case alone${sc.gen ? ' and in the ASCE 7-22 ASD combinations made from the cases\' types (a case with no type taken as live load)' : ''}.${warnUnfactored ? ' Those are service loads: for LRFD, make the LRFD combinations first' : ' Check the types, or make the combinations yourself'}: Load tab → ASCE 7….</p>` : ''}
     ${methodMismatch(sc) ? `<p class="note warn">${esc(methodMismatch(sc))}</p>` : ''}
     ${sc.failed.length ? `<p class="note warn">Not analysed: ${sc.failed.map(esc).join('; ')}</p>` : ''}
     <table class="res"><tr><th class="l">Member</th><th class="l">Section</th><th class="r">L</th><th class="l">Ratio</th><th class="l">Governs</th><th class="l">Under</th></tr>
     ${rows.map(({ mb, c }) => c.res
       ? `<tr class="pick${mb.id === st.checkPick ? ' on' : ''}" data-pick="${mb.id}"><td class="l">${mb.id}</td><td class="l">${esc(c.sec.name)}</td><td class="r">${fLen(memberFrame(mb).L)}</td><td class="l">${ratioHTML(c.res.ratio)}</td><td class="l">${esc(governsWords(c.res))}</td><td class="l">${esc(c.run)}</td></tr>`
       : `<tr><td class="l">${mb.id}</td><td class="l" colspan="5"><span class="hint">not checked: ${esc(c.why)}</span></td></tr>`).join('')}</table>
-    ${st.checkPick != null ? steelWorking(memberById(st.checkPick), sc) : ''}
-    <h3>What the check covers</h3>
+    ${st.checkPick != null ? ((sc.members.get(st.checkPick) || {}).wood ? woodWorking : steelWorking)(memberById(st.checkPick), sc) : ''}
+    ${[...sc.members.values()].some(c => c.wood && c.res) ? woodCovers(sc) : ''}
+    ${[...sc.members.values()].some(c => c.wood && c.res) && ![...sc.members.values()].some(c => c.res && !c.wood) ? '' : `<h3>What the steel check covers</h3>
     <p class="note">AISC 360-22 for doubly symmetric I-shapes bent about the strong axis: tension yielding (D2), flexural buckling in compression (E3, with E7 effective widths of slender elements), yielding and lateral-torsional buckling in bending (F2) and flange local buckling (F3), shear yielding of the web (G2.1), and axial force with bending (H1.1). ${sc.method === 'lrfd' ? 'LRFD: φ × nominal strength.' : 'ASD: nominal strength / Ω.'}</p>
     <p class="note">The moments are first-order. For a frame that sways, or a member with a large axial load, amplify them for second-order effects (B1 and B2 in AISC Appendix 8) or use the direct analysis method, or allow some margin under 1.0. Not covered: tension rupture at connections, webs that are not compact in bending (F4, F5), weak-axis bending, torsion, local loads on the web, and connections.</p>
-    <p class="note">Section properties come from the plates (d, bf, tw, tf) without the root fillets, 1–5% under the AISC Manual's values (on the safe side). Fy comes from the material (Materials tab), or from its name (A992 → 50 ksi, S355 → 355 MPa) when not set.</p>`;
+    <p class="note">Section properties come from the plates (d, bf, tw, tf) without the root fillets, 1–5% under the AISC Manual's values (on the safe side). Fy comes from the material (Materials tab), or from its name (A992 → 50 ksi, S355 → 355 MPa) when not set.</p>`}`;
 }
 // the working for one member: properties, lengths, each strength and the governing ratio
 function steelWorking(mb, sc) {
@@ -13399,8 +13807,8 @@ function steelWorking(mb, sc) {
   const lenNote = (k, v, def) => `${k} = ${Lq(v)}${(mb.design || {})[k] > 0 ? '' : ` <span class="hint">(${def})</span>`}`;
   const wc = r.worst.combined, ws = r.worst.shear;
   return `<h3>Member ${mb.id}: ${esc(c.sec.name)}, ${esc(c.mat.name)}</h3>
-  <p class="note">Ratio <b class="${ratioClass(r.ratio)}">${r.ratio.toFixed(3)}</b> — ${esc(governsWords(r))}, under ${esc(c.run)}, at ${Lq((r.governs === 'shear' ? ws : wc).x)} from node ${mb.i}.
-    ${c.past.length ? `<span class="warn">The member runs straight on past node ${c.past.join(' and ')}: a node is not a brace, so check Lb, Lx and Ly.</span>` : ''}
+  <p class="note">Ratio <b class="${ratioClass(r.ratio)}">${r.ratio.toFixed(3)}</b> — ${esc(governsWords(r))}${r.governs === 'deflection' ? ' (see Deflection below)' : `, under ${esc(c.run)}, at ${Lq((r.governs === 'shear' ? ws : wc).x)} from node ${mb.i}`}.${r.defl && r.governs !== 'deflection' ? ` Strength alone; deflection ${r.defl.ratio.toFixed(3)}.` : r.defl ? ` Strength ${r.strength.toFixed(3)}.` : ''}
+    ${c.past.length ? `<span class="hint">It runs straight on past node ${c.past.join(' and ')} (no brace there), so its lengths are those of the whole run, members ${c.runIds.join(', ')} (${Lq(r.Lrun)}), unless set.</span>` : ''}
     ${r.slenderKL ? '<span class="warn">Lc/r is over 200 (the limit AISC E2 recommends).</span>' : ''}
     ${r.notCovered ? `<span class="warn">${esc(r.notCovered)}.</span>` : ''}</p>
   <div class="eqs">
@@ -13408,7 +13816,7 @@ function steelWorking(mb, sc) {
     A = ${dimq(p.A, 2)}, I<sub>x</sub> = ${dimq(p.Ix, 4)}, S<sub>x</sub> = ${dimq(p.Sx, 3)}, Z<sub>x</sub> = ${dimq(p.Zx, 3)}<br>
     r<sub>x</sub> = ${dimq(p.rx, 1)}, r<sub>y</sub> = ${dimq(p.ry, 1)}, r<sub>ts</sub> = ${dimq(p.rts, 1)}, J = ${dimq(p.J, 4)}, h<sub>o</sub> = ${dimq(p.ho, 1)}<br>
     b<sub>f</sub>/2t<sub>f</sub> = ${fl0.lamF.toFixed(2)} (flange ${fl0.flange} in bending: λ<sub>p</sub> = ${fl0.lpf.toFixed(2)}, λ<sub>r</sub> = ${fl0.lrf.toFixed(2)}), h/t<sub>w</sub> = ${fl0.lamW.toFixed(1)} (λ<sub>p</sub> = ${fl0.lpw.toFixed(1)})<br>
-    ${lenNote('Lx', r.Lx, 'member length')}, ${lenNote('Ly', r.Ly, 'the same as Lb')}, ${lenNote('Lb', r.Lb, 'member length')}, K<sub>x</sub> = ${r.Kx}, K<sub>y</sub> = ${r.Ky}
+    ${lenNote('Lx', r.Lx, r.Lrun > memberFrame(mb).L + 1e-9 ? 'the run' : 'member length')}, ${lenNote('Ly', r.Ly, r.braced ? (r.Lrun > memberFrame(mb).L + 1e-9 ? 'the run' : 'member length') : 'the same as Lb')}, ${lenNote('Lb', r.Lb, r.braced ? 'braced along its length' : r.Lrun > memberFrame(mb).L + 1e-9 ? 'the run' : 'member length')}, K<sub>x</sub> = ${r.Kx}, K<sub>y</sub> = ${r.Ky}
   </div>
   <h3>Compression (E3${r.comp.slender.length ? ', E7' : ''})</h3>
   <div class="eqs">
@@ -13427,6 +13835,7 @@ function steelWorking(mb, sc) {
   </div>
   <h3>Shear (G2.1)</h3>
   <div class="eqs">h/t<sub>w</sub> = ${r.sh.lam.toFixed(1)}: ${esc(r.sh.rule)}<br>V<sub>n</sub> = 0.6 F<sub>y</sub> A<sub>w</sub> C<sub>v1</sub> = ${F(r.sh.Vn / 1e3)}; ${strength(asd ? 'V<sub>n</sub>' : 'φ<sub>v</sub>V<sub>n</sub>', r.sh.Vn / 1e3, r.sh.phi, r.sh.omega)}</div>
+  ${deflWorking(r)}
   <h3>Under ${esc(c.run)}</h3>
   <div class="eqs">
     Axial: ${r.worst.axial.r ? `${F(Math.abs(r.worst.axial.N))} ${r.worst.axial.tension ? 'tension' : 'compression'} at ${Lq(r.worst.axial.x)} → ratio ${r.worst.axial.r.toFixed(3)}` : 'none'}<br>
@@ -13435,11 +13844,88 @@ function steelWorking(mb, sc) {
     ${wc.eq ? `Combined at ${Lq(wc.x)}: P<sub>r</sub>/P<sub>c</sub> = ${wc.pr.toFixed(3)} ${wc.pr >= 0.2 ? `≥ 0.2: P<sub>r</sub>/P<sub>c</sub> + 8/9 M<sub>r</sub>/M<sub>c</sub> (H1-1a) = ${wc.pr.toFixed(3)} + 8/9 × ${wc.mr.toFixed(3)}` : `< 0.2: P<sub>r</sub>/2P<sub>c</sub> + M<sub>r</sub>/M<sub>c</sub> (H1-1b) = ${(wc.pr / 2).toFixed(3)} + ${wc.mr.toFixed(3)}`} = <b>${wc.r.toFixed(3)}</b>` : ''}
   </div>`;
 }
+// the wood member with the largest ratio (the Design tab's wood Working… opens on it)
+function worstWoodId() {
+  let best = null;
+  for (const [id, c] of steelChecks().members) if (c.wood && c.res && (!best || c.res.ratio > best.r)) best = { id, r: c.res.ratio };
+  return best ? best.id : null;
+}
+// the working for one wood member: its reference values, every adjustment factor, the adjusted values and the ratios
+function woodWorking(mb, sc) {
+  const c = sc.members.get(mb.id);
+  if (!mb || !c || !c.res) return '';
+  const r = c.res, v = r.ref, lrfd = r.method === 'lrfd', uD = unit('dim'), dk = toU('dim', 1);
+  const S = x => `${+(x * woodStress().k).toPrecision(4)} ${woodStress().u}`, F = x => fq('force', x), Mq = x => fq('moment', x), Lq = x => fLen(x);
+  const n2 = x => (+x.toFixed(3)).toString(), dimq = (x, k) => `${fsig(x * dk ** k)} ${uD}${k > 1 ? ['', '', '²', '³'][k] : ''}`;
+  const from = k => ({ set: 'set under Materials', grade: c.grade ? `${c.grade}${v.sp && k !== 'Fv' && k !== 'Emin' ? `, ${v.nominal.w} in wide` : ''}` : 'the grade', E: 'from E (NDS Appendix D)' })[c.from[k]];
+  const fmtF = k => (lrfd ? `K<sub>F</sub> ${Design.LRFD_F[k][0]} × φ ${Design.LRFD_F[k][1]}${k === 'Emin' ? '' : ` × λ ${r.time}`}` : k === 'Emin' ? '' : `C<sub>D</sub> ${r.time}`);
+  const times = (...fs) => fs.filter(Boolean).join(' × ');
+  const fac = (name, x) => (Math.abs(x - 1) > 1e-9 ? `${name} ${n2(x)}` : '');
+  const prodWords = { sawn: v.timber ? 'sawn timber' : 'sawn dimension lumber', glulam: 'glulam', scl: 'structural composite lumber (LVL)' }[r.product];
+  const lenNote = (k, x, def) => `${x}${(mb.design || {})[k] > 0 ? '' : ` <span class="hint">(${def})</span>`}`;
+  const wc = r.worst.combined, ws = r.worst.shear;
+  const durWords = lrfd ? `λ = ${r.time} (${r.time === 1 ? 'wind or earthquake in it' : r.time === 0.6 ? 'dead load alone' : 'live, roof or snow load in it'}; NDS Table N3)`
+    : `C<sub>D</sub> = ${r.time} (the shortest load in it: ${esc([...new Set(c.types)].join(', '))}; NDS Table 2.3.2)`;
+  return `<h3>Member ${mb.id}: ${esc(c.sec.name)}, ${esc(c.mat.name)}</h3>
+  <p class="note">Ratio <b class="${ratioClass(r.ratio)}">${r.ratio.toFixed(3)}</b> — ${esc(governsWords(r))}${r.governs === 'deflection' ? ' (see Deflection below)' : `, under ${esc(c.run)}, at ${Lq((r.governs === 'shear' ? ws : wc).x)} from node ${mb.i}`}.${r.defl && r.governs !== 'deflection' ? ` Strength alone; deflection ${r.defl.ratio.toFixed(3)}.` : r.defl ? ` Strength ${r.strength.toFixed(3)}.` : ''}
+    ${c.past.length ? `<span class="hint">It runs straight on past node ${c.past.join(' and ')} (no brace there), so its lengths are those of the whole run, members ${c.runIds.join(', ')} (${Lq(r.Lrun)}), unless set.</span>` : ''}
+    ${r.notes.map(t => `<span class="warn">${esc(t[0].toUpperCase() + t.slice(1))}.</span>`).join(' ')}</p>
+  <div class="eqs">
+    ${esc(prodWords)}${v.nominal && r.product === 'sawn' ? `, nominal ${v.nominal.t}x${v.nominal.w}` : ''}: b = ${dimq(r.b, 1)}, d = ${dimq(r.h, 1)}, A = ${dimq(r.A, 2)}, S = ${dimq(r.S, 3)}<br>
+    ${(() => { const srcs = new Set(WOOD_VALS.map(([k]) => from(k))), one = srcs.size === 1;
+      return WOOD_VALS.map(([k]) => `${k === 'Emin' ? 'E<sub>min</sub>' : `F<sub>${k[1]}</sub>`} = ${S(v[k])}${one ? '' : ` <span class="hint">(${from(k)})</span>`}`).join(', ') + (one ? ` <span class="hint">(${[...srcs][0]})</span>` : ''); })()}<br>
+    ${durWords}; ${r.wet ? `wet service: C<sub>M</sub> ${n2(r.CM.Fb)} (F<sub>b</sub>), ${n2(r.CM.Ft)} (F<sub>t</sub>), ${n2(r.CM.Fv)} (F<sub>v</sub>), ${n2(r.CM.Fc)} (F<sub>c</sub>), ${n2(r.CM.Emin)} (E<sub>min</sub>)` : 'dry service: C<sub>M</sub> = 1'}; C<sub>t</sub> = 1, C<sub>i</sub> = 1
+    ${r.product === 'sawn' && !v.timber ? `<br>Size factor C<sub>F</sub>: ${n2(r.CF.Fb)} (F<sub>b</sub>), ${n2(r.CF.Ft)} (F<sub>t</sub>), ${n2(r.CF.Fc)} (F<sub>c</sub>)${v.sp ? ' <span class="hint">(Southern Pine: in the values)</span>' : ''}${r.Cfu !== 1 ? `; flat use C<sub>fu</sub> = ${n2(r.Cfu)}` : ''}` : ''}
+    ${r.product === 'sawn' && v.timber && r.CF.Fb !== 1 ? `<br>Size factor C<sub>F</sub> = (12/d)<sup>1/9</sup> = ${n2(r.CF.Fb)} on F<sub>b</sub>` : ''}
+    ${r.product === 'scl' ? `<br>Depth factor (12/d)<sup>0.136</sup> = ${n2(r.CF.Fb)} on F<sub>b</sub> <span class="hint">(typical; use the maker's)</span>` : ''}
+    ${r.Cr !== 1 ? `<br>Repetitive member C<sub>r</sub> = ${r.Cr}` : ''}
+    <br>E<sub>min</sub>′ = ${times(`E<sub>min</sub>`, fac('C<sub>M</sub>', r.CM.Emin), fmtF('Emin'))} = ${S(r.Emin)}${Math.abs(r.EminY - r.Emin) > 1e-9 ? `; about the weak axis E<sub>y,min</sub>′ = ${S(r.EminY)} <span class="hint">(${S(v.EminY)} in Table 5A: lateral and out-of-plane buckling)</span>` : ''}
+  </div>
+  <h3>Bending (3.3)</h3>
+  <div class="eqs">
+    F<sub>b</sub>* = ${times('F<sub>b</sub>', fmtF('Fb'), fac('C<sub>M</sub>', r.CM.Fb), fac('C<sub>F</sub>', r.CF.Fb), fac('C<sub>fu</sub>', r.Cfu), fac('C<sub>r</sub>', r.Cr))} = ${S(r.FbStar)}<br>
+    ${r.RB ? `l<sub>u</sub> = ${lenNote('Lb', Lq(r.Lb), r.Lrun > memberFrame(mb).L + 1e-9 ? 'the run' : 'member length')}, l<sub>u</sub>/d = ${(r.Lb * 1000 / r.h).toFixed(1)} → l<sub>e</sub> = ${Lq(r.le)} (Table 3.3.3, any load); R<sub>B</sub> = √(l<sub>e</sub>d/b²) = ${r.RB.toFixed(2)}<br>
+    F<sub>bE</sub> = 1.20 E<sub>${Math.abs(r.EminY - r.Emin) > 1e-9 ? 'y,' : ''}min</sub>′/R<sub>B</sub>² = ${S(r.FbE)}; C<sub>L</sub> (3.3-6) = ${r.CL.toFixed(3)}<br>` : r.braced ? 'l<sub>u</sub> = 0, the compression edge braced along its length: C<sub>L</sub> = 1<br>' : 'd ≤ b: C<sub>L</sub> = 1 (no lateral buckling)<br>'}
+    ${r.product === 'glulam' ? `C<sub>V</sub> = (21/L)<sup>1/${v.sp ? 20 : 10}</sup>(12/d)<sup>1/${v.sp ? 20 : 10}</sup>(5.125/b)<sup>1/${v.sp ? 20 : 10}</sup> = ${r.CV.toFixed(3)}; the lesser of C<sub>L</sub> and C<sub>V</sub> applies<br>` : ''}
+    F<sub>b</sub>′ = ${S(r.Fb)}
+  </div>
+  <h3>Compression (3.6, 3.7)</h3>
+  <div class="eqs">
+    l<sub>e</sub>/d in the plane = ${n2(r.Kx)} × ${lenNote('Lx', Lq(r.Lx), r.Lrun > memberFrame(mb).L + 1e-9 ? 'the run' : 'member length')} / d = ${r.sx.toFixed(1)}; out of the plane = ${n2(r.Ky)} × ${lenNote('Ly', Lq(r.Ly), r.braced ? (r.Lrun > memberFrame(mb).L + 1e-9 ? 'the run' : 'member length') : 'the same as lu')} / b = ${r.sy.toFixed(1)}<br>
+    F<sub>c</sub>* = ${times('F<sub>c</sub>', fmtF('Fc'), fac('C<sub>M</sub>', r.CM.Fc), fac('C<sub>F</sub>', r.CF.Fc))} = ${S(r.FcStar)}; F<sub>cE</sub> = 0.822 E<sub>min</sub>′/(l<sub>e</sub>/d)²: ${S(r.FcE1)} in the plane, ${S(r.FcE2)} out of it → ${S(r.FcE)}<br>
+    c = ${r.c}; C<sub>P</sub> (3.7-1) = ${r.CP.toFixed(3)}; F<sub>c</sub>′ = ${S(r.Fc)}
+  </div>
+  <h3>Tension (3.8) and shear (3.4)</h3>
+  <div class="eqs">
+    F<sub>t</sub>′ = ${times('F<sub>t</sub>', fmtF('Ft'), fac('C<sub>M</sub>', r.CM.Ft), fac('C<sub>F</sub>', r.CF.Ft))} = ${S(r.Ft)}<br>
+    F<sub>v</sub>′ = ${times('F<sub>v</sub>', fmtF('Fv'), fac('C<sub>M</sub>', r.CM.Fv))} = ${S(r.Fv)}; f<sub>v</sub> = 3V/2A
+  </div>
+  ${deflWorking(r)}
+  <h3>Under ${esc(c.run)}</h3>
+  <div class="eqs">
+    Axial: ${r.worst.axial.r ? `${F(Math.abs(r.worst.axial.N))} ${r.worst.axial.tension ? 'tension' : 'compression'} at ${Lq(r.worst.axial.x)}: f = ${S(r.worst.axial.f)} → ratio ${r.worst.axial.r.toFixed(3)}` : 'none'}<br>
+    Bending: M = ${Mq(Math.abs(r.worst.bending.M || 0))} at ${Lq(r.worst.bending.x || 0)}: f<sub>b</sub> = ${S(r.worst.bending.fb || 0)} → ratio ${r.worst.bending.r.toFixed(3)}<br>
+    Shear: V = ${F(Math.abs(ws.V || 0))} at ${Lq(ws.x || 0)}: f<sub>v</sub> = ${S(ws.fv || 0)} → ratio ${ws.r.toFixed(3)}<br>
+    ${wc.buckles ? `Combined at ${Lq(wc.x)}: f<sub>c</sub> = ${S(wc.f)} ≥ F<sub>cE1</sub> = 0.822 E<sub>min</sub>′/(l<sub>e1</sub>/d)² = ${S(0.822 * r.Emin / r.sx ** 2)}: <b>the member buckles in the plane</b> (3.9-3 has no answer); f<sub>c</sub>/F<sub>c</sub>′ = <b>${wc.r.toFixed(3)}</b>` : wc.eq ? `Combined at ${Lq(wc.x)} (f = ${S(wc.f)}, f<sub>b</sub> = ${S(wc.fb)}): ${wc.eq === '3.9-1' ? 'f<sub>t</sub>/F<sub>t</sub>′ + f<sub>b</sub>/F<sub>b</sub>* (3.9-1)' : wc.eq === '3.9-2' ? '(f<sub>b</sub> − f<sub>t</sub>)/F<sub>b</sub>** (3.9-2)' : wc.eq === '3.9-3' ? '(f<sub>c</sub>/F<sub>c</sub>′)² + f<sub>b</sub>/[F<sub>b</sub>′(1 − f<sub>c</sub>/F<sub>cE1</sub>)] (3.9-3)' : 'f<sub>c</sub>/F<sub>cE2</sub> + (f<sub>b</sub>/F<sub>bE</sub>)² (3.9-4)'} = <b>${wc.r.toFixed(3)}</b>` : ''}
+  </div>`;
+}
+// what the wood check covers, under the working
+const woodCovers = sc => `<h3>What the wood check covers</h3>
+    <p class="note">NDS 2018 for rectangular sawn lumber, glulam and LVL members bent in the frame's plane: bending with beam stability (3.3), shear (3.4), compression with column stability (3.6, 3.7), tension (3.8), combined bending and axial force (3.9), and deflection with creep (3.5, K<sub>cr</sub>) when it is on. ${sc.method === 'lrfd' ? 'LRFD: K<sub>F</sub> φ λ on each reference value, λ from the loads in each combination.' : 'ASD: C<sub>D</sub> from the shortest load in each combination (D 0.9, L 1.0, S 1.15, Lr 1.25, W and E 1.6).'}</p>
+    <p class="note">The reference values come from the material's grade (NDS Supplement Tables 4A, 4B and 5A; LVL typical) or from what is set under Materials: check them against the Supplement for your species, grade and size, or the maker's values for glulam and LVL. Timbers (5 in and thicker) need their own values (Table 4D). Glulam is taken as balanced (the same F<sub>b</sub> both ways).</p>
+    <p class="note">Not covered: bearing (F<sub>c⊥</sub>), notches and holes, connections, fire, temperature (C<sub>t</sub>) and incising (C<sub>i</sub>) factors, biaxial bending, and shear near supports taken off (3.4.3: all of V is used, on the safe side). Moments are first-order; 3.9-3 amplifies them for the axial force in the plane.</p>`;
 // the Results tab in the Check view: every member's ratio, worst first; a row opens its working
-function steelResultsPanel() {
+// (the Check view's Results: the steel members, then the wood ones when there are any)
+function checkResultsPanel() {
+  const sc = steelChecks(), wood = [...sc.members.values()].some(c => c.wood && c.res), steel = [...sc.members.values()].some(c => !c.wood && c.res);
+  return wood ? `${steel ? steelResultsPanel() + '<hr>' : ''}${woodResultsPanel()}` : steelResultsPanel();
+}
+function steelResultsPanel(designTab) {
   const sc = steelChecks(), m = st.model;
-  const rows = m.members.map(mb => ({ mb, c: sc.members.get(mb.id) })).filter(o => o.c && o.c.res).sort((a, b) => b.c.res.ratio - a.c.res.ratio);
-  const skipped = m.members.filter(mb => (sc.members.get(mb.id) || {}).why).length;
+  const rows = m.members.map(mb => ({ mb, c: sc.members.get(mb.id) })).filter(o => o.c && o.c.res && !o.c.wood).sort((a, b) => b.c.res.ratio - a.c.res.ratio);
+  const isWood = mb => { const mat = m.materials.find(x => x.id === mb.material); return !!mat && mat.kind === 'wood'; };
+  const skipped = m.members.filter(mb => (sc.members.get(mb.id) || {}).why && !isWood(mb)).length;
+  if (designTab && !rows.length && m.members.some(isWood)) return '<h3>Steel check (AISC 360-22)</h3><p class="hint">No member is steel with an I-section.</p>';
   return `<div class="row"><h3 style="flex:1">Steel check · ${sc.method.toUpperCase()}</h3><button class="btn small" data-act="steel-open">Working…</button></div>
     <p class="hint">AISC 360-22, worst of ${runsWords(sc)}.${sc.kind === 'load cases' && sc.method === 'lrfd' ? ' <span style="color:var(--danger)">These are unfactored: make the combinations first (Load → ASCE 7…).</span>' : ''} First-order moments: see the working for what is covered.</p>
     ${methodMismatch(sc) ? `<p class="hint" style="color:var(--danger)">${esc(methodMismatch(sc))}</p>` : ''}
@@ -13621,7 +14107,7 @@ function drawElHover(g, C) {
   });
 }
 function panelResults() {
-  if (st.view === 'check') return steelResultsPanel();
+  if (st.view === 'check') return checkResultsPanel();
   const R = st.results;
   if (st.error) return `<h3>Results</h3><p class="hint" style="color:var(--danger)">Cannot analyse: ${esc(st.error)}</p>`;
   if (!R) return `<h3>Results</h3><p class="hint">Draw a structure with supports to see results.</p>`;
@@ -13674,7 +14160,7 @@ function onLibraryClick(t) {
   if (t.dataset.sec) { st.libSel.sections = Number(t.dataset.sec); renderPanel(); return; }
   if (t.dataset.case && !act && !t.matches('input')) { st.activeCase = Number(t.dataset.case); changed(); return; }
   if (act === 'show-steps') { openSteps(); return; }
-  if (act === 'steel-open') { openSteelCheck(t.dataset.id ? Number(t.dataset.id) : null); return; }
+  if (act === 'steel-open') { openSteelCheck(t.dataset.id ? Number(t.dataset.id) : t.dataset.wood ? worstWoodId() : null); return; }
   if (act === 'mat-add') commit(() => { const x = { id: newId('material'), ...defaults().concrete }; m.materials.push(x); st.libSel.materials = x.id; });
   else if (act === 'mat-del') commit(() => { const id = st.libSel.materials; m.materials = m.materials.filter(x => x.id !== id); m.members.forEach(x => { if (x.material === id) x.material = null; }); st.libSel.materials = null; });
   else if (act === 'mat-assign') commit(() => { for (const id of st.sel.members) memberById(id).material = st.libSel.materials; });
@@ -13741,7 +14227,12 @@ function onLibraryChange(t, v, f) {
     const mat = m.materials.find(x => x.id === st.libSel.materials), sec = m.sections.find(x => x.id === st.libSel.sections);
     if (id === 'mt-name') mat.name = v;
     else if (id === 'mt-kind') { mat.kind = v; if (v === 'wood' && !(mat.E < 30000)) Object.assign(mat, woodGrade(st.units === 'US' ? 'US:0' : 'EU:1')); } // (switched to wood from a stiffer material: a typical grade to start from)
-    else if (id === 'mt-grade' && v) Object.assign(mat, woodGrade(v));
+    else if (id === 'mt-grade' && v) { Object.assign(mat, woodGrade(v)); delete mat.wd; }
+    else if (id.startsWith('mw-')) { // a wood design value: blank goes back to the grade's
+      const k = id.slice(3); mat.wd = { ...(mat.wd || {}) };
+      if (t.value.trim() === '' || !(f > 0)) delete mat.wd[k]; else mat.wd[k] = f / woodStress().k;
+      if (!Object.keys(mat.wd).length) delete mat.wd;
+    }
     else if (id === 'mt-E') mat.E = fromU('stress', f);
     else if (id === 'mt-Fy') { if (t.value.trim() === '' || !(f > 0)) delete mat.Fy; else mat.Fy = fromU('stress', f); } // blank: from the name
     else if (id === 'mt-gamma') mat.gamma = fromU('weight', f);
