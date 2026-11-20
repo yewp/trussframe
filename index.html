@@ -844,13 +844,15 @@ html, body { margin: 0; }
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="4" fill="currentColor"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg></button>
       <button class="tool" data-tool="hinge" title="Hinge (H). Click a node to hinge every member there (click again to remove). On a member with grid snap on: if the snapped point is the member's end node, just that end is hinged; otherwise a node with a hinge is added at the snapped point. With snap off, near a member end hinges that end and further along adds a node with a hinge">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 12h5.5M15.5 12H21"/><circle cx="12" cy="12" r="3.5"/></svg></button>
-      <!-- members: frame bars (joined rigidly) or truss bars (pinned at both ends); both are the member tool, the
-           variant says which ends it draws -->
-      <div class="tgroup" data-group="Members" data-note="Frame bars join rigidly and carry moment; truss bars are pinned at both ends">
+      <!-- members: frame bars (joined rigidly), truss bars (pinned at both ends) or cables (pinned, tension only); all
+           are the member tool, the variant says what it draws -->
+      <div class="tgroup" data-group="Members" data-note="Frame bars join rigidly and carry moment; truss bars are pinned at both ends; cables only pull">
       <button class="tool cur" data-tool="member" data-variant="frame" data-name="Frame bar" data-key="B" title="Frame bar (B): members joined rigidly, carrying moment. Click node to node; Esc ends the chain">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 19L20 5"/><circle cx="4" cy="19" r="2.2" fill="currentColor"/><circle cx="20" cy="5" r="2.2" fill="currentColor"/></svg></button>
       <button class="tool" data-tool="member" data-variant="truss" data-name="Truss bar" data-key="T" title="Truss bar (T): members pinned at both ends, as in a truss (axial force only). Click node to node; Esc ends the chain">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5.96 17.29L18.04 6.71"/><circle cx="4" cy="19" r="2.6"/><circle cx="20" cy="5" r="2.6"/></svg></button>
+      <button class="tool" data-tool="member" data-variant="cable" data-name="Cable" data-key="C" title="Cable (C): a tension-only member, such as a rod brace: pinned at both ends, it pulls but goes slack instead of pushing. Click node to node; Esc ends the chain">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5.9 17.3Q10.6 15.6 18.1 6.7" stroke-width="1.1"/><circle cx="4" cy="19" r="2.6"/><circle cx="20" cy="5" r="2.6"/></svg></button>
       </div>
       <button class="tool" data-tool="dim" title="Dimension line (D). Click two points, then where the line goes; H / V / A for horizontal, vertical, aligned">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 8v10M21 8v10M3 13h18M1.5 14.5l3-3M19.5 14.5l3-3"/></svg></button>
@@ -1569,7 +1571,8 @@ if (IS_NODE && require.main === module) {
 // 3 DOF per node (ux, uy, rz), Euler-Bernoulli members with axial deformation (or Timoshenko members,
 // with shear deformation, when opts.shear is set),
 // end releases (hinges) by static condensation, fixed-end forces for uniform, linear and
-// temperature loads, supports (fixed / spring, inclined) by penalty, prescribed displacements.
+// temperature loads, supports (fixed / spring, inclined) by penalty, prescribed displacements,
+// tension-only members (cables, rod braces), which go slack instead of pushing (see analyze).
 // Units: kN, m, rad. E in kN/m2 inside the solver.
 //
 // Sign conventions
@@ -1887,14 +1890,37 @@ if (IS_NODE && require.main === module) {
     return R;
   }
 
+  // ---------- tension-only members (cables) ----------
+  // A member with tensionOnly set (a cable, or a rod brace) pulls but cannot push. It is a straight bar pinned at
+  // both ends (whatever its hinge settings say), with axial deformation (whatever the model's setting), and no sag
+  // or pretension: a first-order model, as building programs use for rod bracing. It takes no load along its
+  // length: its own weight goes half to each end node, and any other load on it is refused, since a cable loaded
+  // across its length would sag, which a straight bar cannot show.
+  // What a cable carries depends on the loads, so results no longer add up: each load case or combination is
+  // analysed on its own (as the app does anyway), and the analysis is repeated until every cable is either in
+  // tension or slack (analyze, below).
+  // what kind of load a member load object puts along a cable ('' for none: self-weight goes to the end nodes)
+  function cableLoadKind(ml) {
+    if (!ml) return '';
+    const nz = v => Math.abs(Number(v) || 0) > 0, any = (o, ks) => !!o && ks.some(k => nz(o[k]));
+    const Q = ['qx1', 'qy1', 'qx2', 'qy2'];
+    if (any(ml.uniform, ['qx', 'qy']) || any(ml.linear, Q) || (ml.partials || []).some(p => any(p, Q))) return 'a distributed load';
+    if ((ml.points || []).some(p => any(p, ['fx', 'fy', 'm']))) return 'a point load';
+    if (any(ml.thermal, ['top', 'bottom'])) return 'a temperature change';
+    return '';
+  }
+
   // ---------- analysis ----------
   // model: { nodes:[{id,x,y,support:{x,y,r: 'free'|'fixed'|'spring'}, springs:{x,y,r}, angle}],
-  //          members:[{id,i,j,material,section,hingeI,hingeJ}], materials:[{id,E(MPa),alpha}],
+  //          members:[{id,i,j,material,section,hingeI,hingeJ,tensionOnly}], materials:[{id,E(MPa),alpha}],
   //          sections:[{id,type,dims(m)}] }
   // loads: { node(caseId,nodeId) -> {fx,fy,mz,disp:{dx,dy,rz}|null}, member(caseId,memberId) -> {...} }
   // factors: [[caseId, factor], ...]
   // opts.trace: also return the intermediate matrices (for the step-by-step view)
-  function analyze(model, loads, factors, opts = {}) {
+  // opts.caseNames: { caseId: name }, for the message about a load on a cable
+  // cab (from analyze, for models with cables): { slack: Set of the member ids of slack cables, k: the axial
+  // stiffness EA/L a slack cable keeps (0: none), check: whether to run the accuracy check at the end }
+  function analyzeOnce(model, loads, factors, opts, cab) {
     const nodes = model.nodes, nn = nodes.length;
     if (!nn) throw new Error('The model has no nodes.');
     if (!model.members.length) throw new Error('The model has no members.');
@@ -1926,6 +1952,7 @@ if (IS_NODE && require.main === module) {
     const diagAt = i => pd[i] * W + bw; // where the diagonal term of unknown i is kept
     const add = reuse ? () => {} : (i, j, v) => { put(Kb, i, j, v); if (K) K[i * ndof + j] += v; };
     const elems = [];
+    const lumps = []; // [node index, vertical force]: a cable's own weight, half at each end
 
     for (const mb of model.members) {
       const a = nIndex.get(mb.i), b = nIndex.get(mb.j);
@@ -1939,6 +1966,17 @@ if (IS_NODE && require.main === module) {
       if (!sec) throw new Error(`Member ${mb.id} has no section.`);
       const { A: A0, I: I0, h, As } = sectionProps(sec);
       if (!(A0 > 0) || !(I0 > 0)) throw new Error(`Section "${sec.name}" has zero area or inertia.`);
+      // a cable: pinned at both ends, always stretching, no shear; slack (in cab.slack): it keeps only cab.k
+      const cable = !!mb.tensionOnly, slack = cable && !!cab && cab.slack.has(mb.id);
+      if (cable) for (const [caseId, f] of factors) {
+        if (!f) continue;
+        const what = cableLoadKind(loads.member(caseId, mb.id));
+        if (!what) continue;
+        const cn = opts.caseNames && opts.caseNames[caseId];
+        const err = new Error(`Member ${mb.id} is a cable (tension only), but it has ${what} on it${cn ? ` in "${cn}"` : ''}. A cable takes load only at its ends: put the load on a node, or untick Tension only.`);
+        err.member = mb.id;
+        throw err;
+      }
       // Deformation constraints, per member (as Ftool's): mb.rigid, a rigid member, which neither bends nor stretches;
       // otherwise a flexible member, with axial deformation unless mb.axial is false, and shear deformation if
       // mb.shear is true. A member that does not say takes the model's defaults: opts.axialRigid (no axial
@@ -1946,15 +1984,22 @@ if (IS_NODE && require.main === module) {
       // No axial deformation: the area is scaled up AXIAL_RIGID times for the whole member, stiffness and temperature
       // alike, so bending is unchanged and axial strain becomes negligible; a rigid member has its inertia scaled up
       // the same, so its bending is negligible too.
-      const rigid = !!mb.rigid, axialOn = !rigid && (mb.axial ?? !opts.axialRigid), shearOn = !rigid && (mb.shear ?? !!opts.shear);
-      const A = axialOn ? A0 : A0 * AXIAL_RIGID, I = rigid ? I0 * AXIAL_RIGID : I0;
+      const rigid = !cable && !!mb.rigid, axialOn = cable || (!rigid && (mb.axial ?? !opts.axialRigid)), shearOn = !cable && !rigid && (mb.shear ?? !!opts.shear);
+      const I = rigid ? I0 * AXIAL_RIGID : I0;
       const E = mat.E * 1000, alpha = mat.alpha || 0;
+      const A = slack ? (cab.k > 0 ? cab.k * L / E : 0) : axialOn ? A0 : A0 * AXIAL_RIGID;
       // shear deformation (Timoshenko) when asked for: G from E and Poisson's ratio
       const G = E / (2 * (1 + (Number.isFinite(mat.nu) ? mat.nu : 0.3)));
       const GAs = shearOn && As > 0 ? G * As : Infinity, Phi = shearOn && As > 0 ? 12 * E * I / (GAs * L * L) : 0;
       const c = dx / L, s = dy / L;
-      // self-weight from the real area A0: the axially rigid option scales A for stiffness only
-      const ld = memberLoadLocal(c, s, caseId => loads.member(caseId, mb.id), factors, L, (mat.gamma || 0) * A0);
+      // self-weight from the real area A0: the axially rigid option scales A for stiffness only. A cable's weight goes
+      // half to each end node (as a truss member's is idealised), so it carries no load along its length
+      const ld = memberLoadLocal(c, s, caseId => loads.member(caseId, mb.id), factors, L, cable ? 0 : (mat.gamma || 0) * A0);
+      if (cable && mat.gamma) {
+        let w = 0;
+        for (const [caseId, f] of factors) { const ml = loads.member(caseId, mb.id); if (f && ml && ml.selfWeight) w += f * mat.gamma * A0 * L; }
+        if (w) lumps.push([a, -w / 2], [b, -w / 2]);
+      }
       const { p1, p2 } = ld, [q1, q2] = Phi > 0 ? [0, 0] : [ld.q1, ld.q2]; // with shear, extraFixedEnd takes q
       const Tc = (ld.tTop + ld.tBot) / 2, kth = -alpha * (ld.tTop - ld.tBot) / h;
       const Rx = extraFixedEnd(ld, L, Phi);
@@ -1967,8 +2012,8 @@ if (IS_NODE && require.main === module) {
         (2 * q1 + 3 * q2) * L * L / 60 - E * I * kth,
       ].map((v, i) => v + Rx[i]);
       const rel = [];
-      if (mb.hingeI) rel.push(2);
-      if (mb.hingeJ) rel.push(5);
+      if (mb.hingeI || cable) rel.push(2);
+      if (mb.hingeJ || cable) rel.push(5);
       const k0 = localStiffness(E, A, I, L, Phi);
       const { k, R: Rs } = condense(k0, R, rel);
       const T = [[c, s, 0], [-s, c, 0], [0, 0, 1]];
@@ -1997,7 +2042,7 @@ if (IS_NODE && require.main === module) {
         P[dofs[i]] -= fi;
         Pfe[dofs[i]] += fi;
       }
-      elems.push({ mb, a, b, L, c, s, E, A, I, A0, I0, rigid, axialOn, shearOn, h, As, G, Phi, alpha, k0, R0: R, rel, k, R: Rs, kth, Tc, ld, dofs, kg });
+      elems.push({ mb, a, b, L, c, s, E, A, I, A0, I0, rigid, axialOn, shearOn, h, As, G, Phi, alpha, k0, R0: R, rel, k, R: Rs, kth, Tc, ld, dofs, kg, cable, slack });
     }
 
     // nodal loads and prescribed displacements
@@ -2011,6 +2056,7 @@ if (IS_NODE && require.main === module) {
         if (L.disp) { presc[i][0] += f * (L.disp.dx || 0); presc[i][1] += f * (L.disp.dy || 0); presc[i][2] += f * (L.disp.rz || 0); }
       }
     });
+    for (const [i, fy] of lumps) Pnodal[i * 3 + 1] += fy; // cables' own weight, at their end nodes
     for (let i = 0; i < ndof; i++) P[i] += Pnodal[i];
     // K and P before supports are applied
     const trace = opts.trace ? { ndof, K: Float64Array.from(K), P: Float64Array.from(P), Pnodal, Pfe, presc, elems } : null;
@@ -2023,8 +2069,11 @@ if (IS_NODE && require.main === module) {
     // axial EA/L sets the support penalty and the fixed supports of the stability check, bending 12EI/L³ is
     // the scale a real pivot is judged by
     const median = a => { const s = [...a].sort((p, q) => p - q); return s.length ? s[Math.floor(s.length / 2)] : 1; };
-    const typicalAxial = median(elems.map(el => el.E * el.A / el.L)) || 1;
-    const typicalBend = median(elems.map(el => 12 * el.E * el.I / el.L ** 3)) || 1;
+    // (slack cables, nearly without stiffness, do not count for the axial scale; cables, pinned at both ends, never
+    // bend, so they do not count for the bending scale, unless every member is one)
+    const live = elems.filter(el => !el.slack), bent = elems.filter(el => !el.cable);
+    const typicalAxial = median((live.length ? live : elems).map(el => el.E * el.A / el.L)) || 1;
+    const typicalBend = median((bent.length ? bent : elems).map(el => 12 * el.E * el.I / el.L ** 3)) || 1;
     // the penalty is 1e8 times the larger of the typical member and the stiffest term that is not wildly out
     // of scale: scaling it from the very largest term made one tiny member push it to ~1e26 and swamp the
     // precision of every ordinary member (a 0.1 mm member gave deflections 75% off)
@@ -2067,7 +2116,7 @@ if (IS_NODE && require.main === module) {
     // rotational stiffness 4EI/L, not the largest term: with a very short member in the model the largest
     // term is ~1e18, and ordinary joint rotations (~1e5) were taken for free ones and locked, turning pinned
     // supports into fixed ones (a 0.1 mm member made a simple beam act fixed-fixed, deflection 75% low)
-    const typicalRot = median(elems.map(el => 4 * el.E * el.I / el.L)) || 1;
+    const typicalRot = median((bent.length ? bent : elems).map(el => 4 * el.E * el.I / el.L)) || 1;
     const floating = reuse ? cache.floating : [];
     if (!reuse) for (let i = 0; i < nn; i++) {
       const r = i * 3 + 2;
@@ -2157,7 +2206,7 @@ if (IS_NODE && require.main === module) {
         const longest = Math.max(...elems.map(el => el.L)), tiny = elems.filter(el => el.L < longest * 2e-5);
         const hint = tiny.length ? ` Member ${tiny[0].mb.id} is only ${(tiny[0].L * 1000).toPrecision(2)} mm long, too short to solve next to the rest of the model; its two nodes are probably meant to be one node, so merge them.` : ' Add supports or remove hinges.';
         const err = new Error(`The structure is unstable (a mechanism): nothing restrains the ${what} at node ${n.id}.${hint}`);
-        err.node = n.id;
+        err.node = n.id; err.mechanism = true;
         throw err;
       }
       throw e;
@@ -2173,7 +2222,9 @@ if (IS_NODE && require.main === module) {
       // global end forces on the member -> add to reactions bookkeeping
       const fg = [c * f[0] - s * f[1], s * f[0] + c * f[1], f[2], c * f[3] - s * f[4], s * f[3] + c * f[4], f[5]];
       for (let i = 0; i < 3; i++) { reactions[el.a][i] += fg[i]; reactions[el.b][i] += fg[3 + i]; }
-      return { id: el.mb.id, i: el.mb.i, j: el.mb.j, L: el.L, c, s, f, dl, EI: el.E * el.I, EA: el.E * el.A, GAs: el.Phi > 0 ? el.G * el.As : Infinity, kth: el.kth, Tc: el.Tc, alpha: el.alpha, ld: el.ld };
+      const mr = { id: el.mb.id, i: el.mb.i, j: el.mb.j, L: el.L, c, s, f, dl, EI: el.E * el.I, EA: el.E * el.A, GAs: el.Phi > 0 ? el.G * el.As : Infinity, kth: el.kth, Tc: el.Tc, alpha: el.alpha, ld: el.ld };
+      if (el.cable) { mr.cable = true; mr.kc = el.E * el.A0 / el.L; } // a cable, and its axial stiffness EA/L when taut
+      return mr;
     });
     nodes.forEach((n, i) => { for (let d = 0; d < 3; d++) reactions[i][d] -= Pnodal[i * 3 + d]; });
     const supported = nodes.map(n => {
@@ -2183,8 +2234,8 @@ if (IS_NODE && require.main === module) {
     // accuracy check: at an unsupported node the member end forces must balance the nodal load exactly, so
     // what is left over there measures how many digits the solve kept. Ordinary models leave ~1e-12 of the
     // largest end force; a member ~1e5 times shorter than the rest leaves ~1e-3, and then the results are
-    // refused rather than shown
-    {
+    // refused rather than shown. (Not in the rounds that find which cables are slack: only their final analysis.)
+    if (!cab || cab.check) {
       let fmax = 0, mmax = 0, fbad = 0, mbad = 0;
       for (const mr of members) for (let d = 0; d < 6; d++) (d % 3 === 2 ? (mmax = Math.max(mmax, Math.abs(mr.f[d]))) : (fmax = Math.max(fmax, Math.abs(mr.f[d]))));
       nodes.forEach((n, i) => {
@@ -2204,7 +2255,98 @@ if (IS_NODE && require.main === module) {
       members,
       floatingRotations: floating.map(i => nodes[i].id),
       trace: trace && { ...trace, u },
+      kRef: typicalAxial, // a typical member's axial stiffness EA/L (for the stiffness slack cables keep)
     };
+  }
+
+  // A slack cable keeps no stiffness when the structure stands without it. When it does not (a pin-jointed frame
+  // braced only by cables, under gravity alone, has both braces slack and nothing holding it sideways), the cables
+  // keep a tiny stiffness, these fractions of a typical member's EA/L, and the analysis is done with both: the
+  // difference tells whether the loads push the structure in a direction only those cables could hold.
+  const SLACK_K = [1e-6, 1e-8];
+  // One round: with the cables in `slack` slack, what each cable would carry, T (tension +): a taut cable its force;
+  // a slack one the force it would have if it were taut (EA/L times how much its ends move apart). Where the
+  // structure stands without the slack cables, from one exact analysis. Where it does not, from two with the tiny
+  // stiffnesses ε: the stretch of a slack cable is δ = δ0 + m/ε, a part that grows without bound as ε goes to zero
+  // (the structure swinging in the direction nothing else holds) and a part that does not. kRef·m is the force the
+  // cable takes in the limit: positive, the swing would pull it taut; negative, the loads need it to push (pushers);
+  // zero, nothing pushes that way, and the finite part δ0 decides.
+  function cableState(model, loads, factors, opts, slack, kRef) {
+    const T = new Map(), pushers = [];
+    // the scale of the forces: 1e-9 of the largest end force of a working member (and a floor of 1e-12 kN)
+    const tolOf = r => { let F = 0; for (const mr of r.members) if (!slack.has(mr.id)) for (const d of [0, 1, 3, 4]) F = Math.max(F, Math.abs(mr.f[d])); return 1e-9 * F + 1e-12; };
+    let r = null;
+    try { r = analyzeOnce(model, loads, factors, opts, { slack, k: 0, check: false }); } catch (e) { if (!e.mechanism || !slack.size) throw e; }
+    if (r) {
+      for (const mr of r.members) if (mr.cable) T.set(mr.id, slack.has(mr.id) ? mr.kc * (mr.dl[3] - mr.dl[0]) : mr.f[3]);
+      return { T, tol: tolOf(r), stable: true, pushers, kRef: r.kRef };
+    }
+    const [e1, e2] = SLACK_K;
+    const r1 = analyzeOnce(model, loads, factors, opts, { slack, k: e1 * kRef, check: false });
+    const r2 = analyzeOnce(model, loads, factors, opts, { slack, k: e2 * kRef, check: false });
+    const tol = tolOf(r2);
+    r2.members.forEach((mr, n) => {
+      if (!mr.cable) return;
+      if (!slack.has(mr.id)) { T.set(mr.id, mr.f[3]); return; }
+      const m1 = r1.members[n], d1 = m1.dl[3] - m1.dl[0], d2 = mr.dl[3] - mr.dl[0];
+      const m = (d2 - d1) * e1 * e2 / (e1 - e2), B = kRef * m;
+      if (Math.abs(B) > tol) { T.set(mr.id, B); if (B < 0) pushers.push({ id: mr.id, B }); } else T.set(mr.id, mr.kc * (d1 - m / e1));
+    });
+    return { T, tol, stable: false, pushers, kRef };
+  }
+  // The analysis. With cables (members with tensionOnly), it is repeated: every cable starts taut; a taut one in
+  // compression goes slack, and a slack one whose ends would move apart (it would be in tension) is taut again;
+  // until nothing changes. Then each cable is in tension or slack, and the results are those of the last analysis,
+  // with the slack cables' forces exactly zero. If a set of slack cables comes round again, the changes are made one
+  // at a time, the cable furthest out first; if that does not settle either, it is an error (as it is when the loads
+  // would need a cable to push).
+  // opts.cablesLinear, or opts.cache (the same structure under many loads, whose results are added together, as for
+  // an influence line): the cables are taken as ordinary pinned bars, all working (r.cablesLinear).
+  // The results carry slack: the ids of the slack cables ([] with none), and cableRounds: how many rounds it took.
+  function analyze(model, loads, factors, opts = {}) {
+    const cables = model.members.filter(mb => mb.tensionOnly).map(mb => mb.id);
+    if (!cables.length || opts.cablesLinear || opts.cache) {
+      const r = analyzeOnce(model, loads, factors, opts, null);
+      r.slack = [];
+      if (cables.length) r.cablesLinear = true;
+      return r;
+    }
+    const quiet = { ...opts, trace: false }, slack = new Set(), seen = new Set(['']), most = 3 * cables.length + 30;
+    const list = ids => (ids.length === 1 ? `member ${ids[0]}` : `members ${ids.slice(0, -1).join(', ')} and ${ids[ids.length - 1]}`);
+    let single = false, rounds = 0, kRef = 0, state;
+    for (;;) {
+      state = cableState(model, loads, factors, quiet, slack, kRef);
+      rounds++;
+      if (!kRef) kRef = state.kRef;
+      const flips = [];
+      for (const id of cables) {
+        const t = state.T.get(id);
+        if (slack.has(id) ? t > state.tol : t < -state.tol) flips.push({ id, by: Math.abs(t) });
+      }
+      if (!flips.length) break;
+      const settle = () => {
+        const ids = flips.map(f => f.id).sort((p, q) => p - q);
+        const err = new Error(`The cables (tension-only members) do not settle: ${list(ids)} keep${ids.length === 1 ? 's' : ''} going taut and slack from one analysis to the next. Untick Tension only for one of them, or brace the structure another way.`);
+        err.members = ids;
+        return err;
+      };
+      if (rounds >= most) throw settle();
+      for (const { id } of single ? [flips.reduce((p, q) => (q.by > p.by ? q : p))] : flips) { if (slack.has(id)) slack.delete(id); else slack.add(id); }
+      const key = [...slack].sort((p, q) => p - q).join(',');
+      if (seen.has(key)) { if (single) throw settle(); single = true; seen.clear(); }
+      seen.add(key);
+    }
+    if (state.pushers.length) {
+      const ids = state.pushers.sort((p, q) => p.B - q.B).map(p => p.id), one = ids.length === 1;
+      const err = new Error(`Under these loads the structure needs ${list(ids)} to push, but ${one ? 'it is a cable' : 'they are cables'} (tension only): with ${one ? 'it' : 'them'} slack, nothing holds the structure that way. Add a cable or brace the other way (an X), or untick Tension only.`);
+      err.members = ids;
+      throw err;
+    }
+    const r = analyzeOnce(model, loads, factors, opts, { slack, k: state.stable ? 0 : SLACK_K[1] * kRef, check: true });
+    for (const mr of r.members) if (slack.has(mr.id)) mr.f = [0, 0, 0, 0, 0, 0];
+    r.slack = [...slack].sort((p, q) => p - q);
+    r.cableRounds = rounds;
+    return r;
   }
 
   // ---------- results along a member ----------
@@ -2285,7 +2427,7 @@ if (IS_NODE && require.main === module) {
     return [...out];
   }
 
-  const api = { analyze, memberStations, sectionProps, sectionParts, partsProps, loadBreaks, memberLoadLocal };
+  const api = { analyze, memberStations, sectionProps, sectionParts, partsProps, loadBreaks, memberLoadLocal, cableLoadKind };
   // this file's own text, so the app can start a copy of the solver in a background worker without loading a
   // file (which a page opened from disk may not do)
   api.source = '(' + frameSolverFactory.toString() + ')';
@@ -3026,7 +3168,7 @@ if (IS_NODE && require.main === module) {
     return { props: p, Fy, E, method: asd ? 'asd' : 'lrfd', Lrun, braced, Lx, Ly, Lb, Kx, Ky, comp, PnT, sh, cap, segs, worst,
       ratio: Math.max(worst.combined.r, worst.shear.r), governs,
       notCovered: segs.some(g => g.fl.webNotCompact) ? `the web is not compact for flexure (h/tw = ${segs[0].fl.lamW.toFixed(1)} > ${segs[0].fl.lpw.toFixed(1)}): AISC F4/F5 are not covered` : null,
-      slenderKL: comp.Lc_r > 200 };
+      slenderKL: !design.tensionOnly && comp.Lc_r > 200 }; // (a cable is never in compression)
   }
 
   // ---------- NDS 2018 wood members (rectangular sections) ----------
@@ -6209,7 +6351,16 @@ function load() {
 }
 
 let recalcTimer = null;
+// A cable (tensionOnly) is always pinned at both ends and never a rigid member: kept so after every change, whatever
+// made it (a split, the hinge tool, a paste), so the drawing shows what the solver takes it to be
+function tidyCables(m = st.model) {
+  for (const mb of m.members) if (mb.tensionOnly) { mb.hingeI = true; mb.hingeJ = true; delete mb.rigid; }
+}
+// st.rev counts the changes to the model: the caches of what is drawn from it compare it. (The undo stack's length
+// cannot tell: it stops growing at 200 steps, and after that a change left the drawn loads as they were.)
 function changed() {
+  st.rev = (st.rev || 0) + 1;
+  tidyCables();
   applyParams();
   save();
   renderUndoButtons();
@@ -6238,6 +6389,7 @@ function setAppPref(k, v) {
 // A member's deformation constraints (Properties ▸ Deformation): rigid, or flexible with or without axial and shear
 // deformation; a member that does not say takes the model's defaults (Settings ▸ Analysis)
 function memberDeform(mb, m = st.model) {
+  if (mb.tensionOnly) return { rigid: false, axial: true, shear: false }; // a cable always stretches, and never bends
   const rigid = !!mb.rigid;
   return { rigid, axial: !rigid && (mb.axial ?? !m.axialRigid), shear: !rigid && (mb.shear ?? !!m.shearDef) };
 }
@@ -6305,6 +6457,13 @@ function selfWeightTotal(m = st.model) {
   }
   return { W, none };
 }
+// the load cases' names by id, for the solver's message about a load on a cable
+const caseNamesOf = (m = st.model) => Object.fromEntries(m.cases.map(c => [c.id, c.name]));
+const hasCables = (m = st.model) => m.members.some(mb => mb.tensionOnly);
+// the load cases (names) in which a member has a load along its length, which a cable cannot take
+const loadedAlongIn = (mb, m = st.model) => m.cases.filter(c => { const L = m.loads[c.id]; return L && FrameSolver.cableLoadKind(L.members[mb.id]); }).map(c => c.name);
+// a cable can take no load along its length: the message for a load tool, or Properties, that was about to put one there
+const cableLoadMsg = mb => `Member ${mb.id} is a cable (tension only): it takes load only at its ends. Put the load on one of its nodes (${mb.i} or ${mb.j}).`;
 // analysis of one load case or combination; throws when the structure cannot be analysed
 // (m: another model to analyse, such as the beam solver's copy; by default the model itself)
 function analyzeFor(active, opts, m = st.model) {
@@ -6313,7 +6472,7 @@ function analyzeFor(active, opts, m = st.model) {
     member: (c, id) => memberLoadsFor(m, c, id),
   };
   // shear deformation (Timoshenko members) is a setting of the model, saved with it
-  const r = FrameSolver.analyze(solverModel(m), loads, factorsFor(active, m), { ...opts, shear: !!m.shearDef, axialRigid: !!m.axialRigid });
+  const r = FrameSolver.analyze(solverModel(m), loads, factorsFor(active, m), { ...opts, shear: !!m.shearDef, axialRigid: !!m.axialRigid, caseNames: caseNamesOf(m) });
   // extra stations at point loads and partial-load ends of every case, so all cases share positions
   const breaks = id => FrameSolver.loadBreaks(Object.values(m.loads).map(L => L.members[id]));
   r.stations = new Map(r.members.map(mr => [mr.id, FrameSolver.memberStations(mr, 40, breaks(mr.id))]));
@@ -6462,7 +6621,7 @@ function solveInBackground() {
   if (!w) return false;
   const env = isEnv(st.activeCase);
   const runs = env ? envelopeRuns(st.activeCase).map(r => ({ key: r.key, name: r.name, factors: factorsFor(r.key) })) : [{ key: st.activeCase, factors: factorsFor(st.activeCase) }];
-  const job = { model: solverModel(m), loads: m.loads, swCases: m.cases.filter(c => c.selfWeight).map(c => c.id), runs, opts: { shear: !!m.shearDef, axialRigid: !!m.axialRigid } };
+  const job = { model: solverModel(m), loads: m.loads, swCases: m.cases.filter(c => c.selfWeight).map(c => c.id), runs, opts: { shear: !!m.shearDef, axialRigid: !!m.axialRigid, caseNames: caseNamesOf(m) } };
   // with Scale on, the worker then solves every case too, for the largest reaction (reactionMaxima)
   const scaled = arrowSettings().prop;
   if (scaled) job.reactCases = m.cases.map(c => c.id);
@@ -6652,21 +6811,23 @@ function hitSupport(px, py) {
   }
   return null;
 }
-// what a Delete tool click at a screen point would remove, in order: load, hinge, node, support, dimension, member
+// what a Delete tool click at a screen point would remove, in order: load, hinge, node, support, dimension, member.
+// (A cable's ends are not hinges that can be removed: a cable is always pinned.)
 function deleteTarget(px, py) {
   const ld = hitLoad(px, py);
   if (ld) return { kind: 'load', ld };
   const m = st.model, pins = hingeNodes();
   for (const mb of m.members) { // a hinge circle drawn next to the node
+    if (mb.tensionOnly) continue;
     const a = nodeById(mb.i), b = nodeById(mb.j), [ax, ay] = toScreen(a.x, a.y), [bx, by] = toScreen(b.x, b.y);
     const len = Math.hypot(bx - ax, by - ay) || 1, ux = (bx - ax) / len, uy = (by - ay) / len;
     if (mb.hingeI && !pins.has(mb.i) && Math.hypot(ax + ux * 9 - px, ay + uy * 9 - py) < 5) return { kind: 'hinge', ends: [[mb.id, 'hingeI']] };
     if (mb.hingeJ && !pins.has(mb.j) && Math.hypot(bx - ux * 9 - px, by - uy * 9 - py) < 5) return { kind: 'hinge', ends: [[mb.id, 'hingeJ']] };
   }
   const n = hitNode(px, py, 7);
-  if (n && pins.has(n.id)) { // a hinged node: the first click removes the hinge, the next one the node
-    const ends = m.members.flatMap(mb => [mb.i === n.id && mb.hingeI ? [mb.id, 'hingeI'] : null, mb.j === n.id && mb.hingeJ ? [mb.id, 'hingeJ'] : null]).filter(Boolean);
-    return { kind: 'hinge', node: n.id, ends };
+  if (n && pins.has(n.id)) { // a hinged node: the first click removes the hinge, the next one the node (cables keep theirs)
+    const ends = m.members.filter(mb => !mb.tensionOnly).flatMap(mb => [mb.i === n.id && mb.hingeI ? [mb.id, 'hingeI'] : null, mb.j === n.id && mb.hingeJ ? [mb.id, 'hingeJ'] : null]).filter(Boolean);
+    if (ends.length) return { kind: 'hinge', node: n.id, ends };
   }
   if (n) return { kind: 'node', id: n.id };
   const sp = hitSupport(px, py);
@@ -6752,8 +6913,14 @@ function splitMember(mb, x, y) {
   const a = nodeById(mb.i), b = nodeById(mb.j);
   const L = Math.hypot(b.x - a.x, b.y - a.y), t = Math.hypot(x - a.x, y - a.y) / L;
   const n = newNode(x, y);
-  const m2 = { id: newId('member'), i: n.id, j: mb.j, material: mb.material, section: mb.section, hingeI: false, hingeJ: mb.hingeJ };
-  mb.j = n.id; mb.hingeJ = false;
+  // The second piece is a copy of the member, so it keeps every setting the first piece keeps: material, section,
+  // rigid, axial and shear deformation, cable, and the Design tab's settings (braced lengths, Cb, K, deflection
+  // check, repetitive member). The design check reads them over the straight run, and a plain node keeps the run as
+  // it was, so splitting a member alone changes no result. The new node is a rigid joint, except on a cable, which is
+  // pinned there too.
+  const cable = !!mb.tensionOnly;
+  const m2 = { ...JSON.parse(JSON.stringify(mb)), id: newId('member'), i: n.id, j: mb.j, hingeI: cable, hingeJ: mb.hingeJ };
+  mb.j = n.id; mb.hingeJ = cable;
   st.model.members.push(m2);
   for (const c in st.model.loads) {
     const L1 = st.model.loads[c].members[mb.id];
@@ -8428,8 +8595,8 @@ function modelLayerKey(w, h, C) {
   // a checksum of the geometry, in case something moved a node or re-ended a member without an undo step
   let geo = s.model.nodes.length * 7 + s.model.members.length * 13, k = 1;
   for (const n of s.model.nodes) { geo += (n.x * 1.000001 + n.y * 1.37) * (k++ % 97 + 1) + (n.angle || 0); }
-  for (const mb of s.model.members) geo += (mb.i * 3 + mb.j * 5 + (mb.hingeI ? 1 : 0) + (mb.hingeJ ? 2 : 0)) * (k++ % 89 + 1);
-  return JSON.stringify([geo,w, h, s.view, s.activeCase, s.cam, s.undo.length, s.redo.length, s.snap, s.gridStep, s.gridStepY, s.gridLinked, s.gridOrigin, s.gridAngle || 0,
+  for (const mb of s.model.members) geo += (mb.i * 3 + mb.j * 5 + (mb.hingeI ? 1 : 0) + (mb.hingeJ ? 2 : 0) + (mb.tensionOnly ? 4 : 0)) * (k++ % 89 + 1);
+  return JSON.stringify([geo,w, h, s.view, s.activeCase, s.cam, s.undo.length, s.redo.length, s.rev || 0, s.snap, s.gridStep, s.gridStepY, s.gridLinked, s.gridOrigin, s.gridAngle || 0,
     s.unitCfg, s.showIds, viewShowsResults() ? [s.error || '', s.solving || 0] : 0, s.probe || 0, s.focusLoad || 0, s.elHover == null ? -1 : s.elHover, set(s.sel.nodes), set(s.sel.members), set(s.sel.dims),
     Object.values(C), displayOpts(), (s.view === 'custom' || s.view === 'model') ? customLayers() : 0, arrowSettings()]);
 }
@@ -8578,9 +8745,13 @@ function render(cursorOnly = false) {
     // deleting a node also deletes its members, so they turn red with it
     const del = (hd && hd.kind === 'member' && hd.id === mb.id) || (bd && bd.members.has(mb.id)) || delNode(mb.i) || delNode(mb.j);
     const faded = custom ? !!R && ['N', 'V', 'M', 'deformed'].some(has) : view === 'influence' ? !!st.infl : showResults && view !== 'R';
+    // a cable is drawn thinner; in the results of one load case or combination, a slack one is dashed and says so
+    const cable = !!mb.tensionOnly;
+    const slack = cable && !!R && Array.isArray(R.slack) && R.slack.includes(mb.id) && (custom ? ['N', 'V', 'M', 'deformed'].some(has) : showResults && view !== 'influence' && view !== 'check');
     if (del) glow('line', { x1: ax, y1: ay, x2: bx, y2: by, stroke: C.del, 'stroke-width': 12, 'stroke-linecap': 'round' });
-    g.appendChild(el('line', { x1: ax, y1: ay, x2: bx, y2: by, stroke: del ? C.del : sel ? C.accent : C.ink, 'stroke-width': del || sel ? 4 : 2.4, 'stroke-linecap': 'round', opacity: faded && !del ? 0.35 : 1 }));
+    g.appendChild(el('line', { x1: ax, y1: ay, x2: bx, y2: by, stroke: del ? C.del : sel ? C.accent : C.ink, 'stroke-width': cable ? (del || sel ? 3 : 1.5) : del || sel ? 4 : 2.4, 'stroke-linecap': 'round', opacity: faded && !del ? 0.35 : 1, ...(slack ? { 'stroke-dasharray': '6 4' } : {}) }));
     const len = Math.hypot(bx - ax, by - ay) || 1, ux = (bx - ax) / len, uy = (by - ay) / len;
+    if (slack && len > 46) g.appendChild(el('text', { x: ax + (bx - ax) * 0.3 - uy * 10, y: ay + (by - ay) * 0.3 + ux * 10 + 4, 'text-anchor': 'middle', class: 'lbl-id' }, 'slack'));
     const hinge = (cx, cy, end) => {
       const d = delHinge(mb.id, end);
       if (d) glowDot(cx, cy, 10);
@@ -8711,7 +8882,7 @@ function render(cursorOnly = false) {
       else if (dirShown) why = (why.match(/, to (.*)$/) || ['', ''])[1]; // only "member 4" (where it ends)
       if (why && dirShown) why = `to ${why}`;
       const splits = (t => (t && t.mb ? `splits member ${t.mb.id}` : ''))(typedEnd ? pointTarget(...tw) : liveAimTarget());
-      const notes = [memberVariant() === 'truss' ? 'truss bar: pinned ends' : '', why, splits].filter(Boolean).join(' · ');
+      const notes = [{ truss: 'truss bar: pinned ends', cable: 'cable: tension only' }[memberVariant()] || '', why, splits].filter(Boolean).join(' · ');
       const box = memberBoxes(e, L, ang);
       if (st.typed || L > 1e-9) inputBoxes(g, tx, ty, box.fields, [notes, box.hint].filter(Boolean), C, !!box.bad, [tx - ax, ty - ay]); // past the end
     }
@@ -8766,11 +8937,12 @@ function render(cursorOnly = false) {
         const nd = nodeById(id), [nx, ny] = toScreen(nd.x, nd.y);
         g.appendChild(el('circle', { cx: nx, cy: ny, r: 9, fill: 'none', stroke: C.accent, 'stroke-width': 2, 'stroke-dasharray': '3 2' }));
       }
-      const spots = t.kind === 'new' ? [toScreen(...t.at)] : t.kind === 'node' ? [toScreen(t.node.x, t.node.y)] : t.ends.map(([mb, e]) => {
+      // (a cable's end: only the label, saying it is always pinned)
+      const spots = t.kind === 'new' ? [toScreen(...t.at)] : t.kind === 'node' || (t.kind === 'cable' && t.node) ? [toScreen(t.node.x, t.node.y)] : t.kind === 'cable' ? [st.mouse] : t.ends.map(([mb, e]) => {
         const a = nodeById(mb.i), b = nodeById(mb.j), [ax, ay] = toScreen(a.x, a.y), [bx, by] = toScreen(b.x, b.y), L = Math.hypot(bx - ax, by - ay) || 1;
         return e === 'hingeI' ? [ax + (bx - ax) / L * 9, ay + (by - ay) / L * 9] : [bx - (bx - ax) / L * 9, by - (by - ay) / L * 9];
       });
-      for (const [cx, cy] of spots) {
+      if (t.kind !== 'cable') for (const [cx, cy] of spots) {
         g.appendChild(el('circle', { cx, cy, r: t.kind === 'end' ? 5 : 6.5, fill: C.sheet, stroke: C.accent, 'stroke-width': 2.2 }));
         if (!t.on) g.appendChild(el('path', { d: `M${cx - 8} ${cy + 8}L${cx + 8} ${cy - 8}`, stroke: C.accent, 'stroke-width': 2 }));
       }
@@ -9020,9 +9192,9 @@ function loadPointXY(p) {
 // list is built in one pass however many loads there are).
 let loadSnapCache = null;
 function loadSnapPoints() {
-  const key = [st.model, st.undo.length, st.redo.length], c = loadSnapCache;
+  const key = [st.model, st.undo.length, st.redo.length, st.rev], c = loadSnapCache;
   const live = st.drag && st.drag.kind === 'load';
-  if (!live && c && c.key[0] === key[0] && c.key[1] === key[1] && c.key[2] === key[2]) return c.out;
+  if (!live && c && key.every((v, i) => v === c.key[i])) return c.out;
   const out = [], seen = new Set();
   for (const L of Object.values(st.model.loads)) for (const [mid, ML] of Object.entries(L.members)) {
     const mb = memberById(Number(mid)); if (!mb) continue;
@@ -9294,11 +9466,16 @@ function placeTypedNode() {
   const [sx, sy] = toScreen(...p), { w, h } = viewSize();
   if (sx < 20 || sy < 20 || sx > w - 20 || sy > h - 20) { st.cam.x = p[0]; st.cam.y = p[1]; render(); }
 }
-// The member tool draws frame bars (joined rigidly, carrying moment) or truss bars (pinned at both ends): two buttons
-// in the toolbar's Members group, B and T. Which one is kept with the tool's settings (memberPinned).
-const memberVariant = () => st.memberVariant || (loadDefaults().memberPinned ? 'truss' : 'frame');
+// The member tool draws frame bars (joined rigidly, carrying moment), truss bars (pinned at both ends) or cables
+// (pinned at both ends, tension only): three buttons in the toolbar's Members group, B, T and C. Which one is kept
+// with the tool's settings (memberPinned, memberCable).
+const memberVariant = () => st.memberVariant || (loadDefaults().memberCable ? 'cable' : loadDefaults().memberPinned ? 'truss' : 'frame');
+const MEMBER_KINDS = { frame: 'Frame bar', truss: 'Truss bar', cable: 'Cable' };
 function setMemberVariant(v) {
-  if (v !== memberVariant()) setToolValue('memberPinned', v === 'truss' ? true : undefined); // remembered in this browser
+  if (v !== memberVariant()) { // remembered in this browser
+    setToolValue('memberPinned', v === 'truss' ? true : undefined);
+    setToolValue('memberCable', v === 'cable' ? true : undefined);
+  }
   st.memberVariant = v;
   showMemberVariant();
 }
@@ -9306,10 +9483,11 @@ function setMemberVariant(v) {
 function showMemberVariant() { document.querySelectorAll('.tool[data-variant]').forEach(b => b.classList.toggle('cur', b.dataset.variant === memberVariant())); }
 // whether a toolbar button is the tool in use (the member tool's two buttons: by which kind it draws)
 const toolIsOn = b => b.dataset.tool === st.tool && (!b.dataset.variant || b.dataset.variant === memberVariant());
-// a member drawn with the member tool: hinged at both ends when it draws truss bars
+// a member drawn with the member tool: hinged at both ends when it draws truss bars or cables, and tension only for a cable
 function drawnMember(i, j) {
   const mb = addMember(i, j);
-  if (mb && memberVariant() === 'truss') { mb.hingeI = true; mb.hingeJ = true; }
+  if (mb && memberVariant() !== 'frame') { mb.hingeI = true; mb.hingeJ = true; }
+  if (mb && memberVariant() === 'cable') mb.tensionOnly = true;
   return mb;
 }
 function placeTyped() {
@@ -9754,7 +9932,7 @@ function drawProp(key) {
 function memberBarHTML() {
   const m = st.model;
   const sel =(key, list) => `<select data-draw="${key}">${list.length ? list.map(x => obOpt(x.id, x.name, drawProp(key))).join('') : '<option value="">— none —</option>'}</select>`;
-  return `<b class="ob-name">${memberVariant() === 'truss' ? 'Truss bar' : 'Frame bar'}</b>`
+  return `<b class="ob-name">${MEMBER_KINDS[memberVariant()]}</b>`
     + `<label class="ob-f ob-ms">Material${sel('material', m.materials)}</label>`
     + `<label class="ob-f ob-ms">Section${sel('section', m.sections)}</label>`
     + `<label class="ob-f" for="ob-len">Length<input type="text" inputmode="decimal" id="ob-len" data-mt="len" autocomplete="off" spellcheck="false"><span class="unit">${unit('len')}</span></label>`
@@ -10160,6 +10338,7 @@ function loadCaseNote() {
 function placeThermal(px, py) {
   const hm = hitMember(px, py, 10), D = loadDefaults(), cs = editCaseId();
   if (!hm) { flash('Click a member to give it the temperature change.', true); return; }
+  if (hm.mb.tensionOnly) { flash(cableLoadMsg(hm.mb), true); return; }
   if (st.view !== 'model' && st.view !== 'custom') document.querySelector('#view-seg [data-view="model"]').click();
   const id = hm.mb.id;
   let added = [];
@@ -10177,6 +10356,7 @@ function placeLoad(tool, px, py) {
   const t = loadTarget(px, py), D = loadDefaults(), cs = editCaseId();
   if (!t) { flash(st.typed ? 'Click a member to put the load at the typed distance.' : 'Click a node or a member.', true); return; }
   if (t.over) { flash(typedTooFar(t), true); return; }
+  if (t.mb && t.mb.tensionOnly) { st.typed = ''; flash(cableLoadMsg(t.mb), true); render(); return; }
   st.typed = ''; // a typed distance is for this load only
   if (st.view !== 'model' && st.view !== 'custom') document.querySelector('#view-seg [data-view="model"]').click();
   let info, added = [];
@@ -10302,9 +10482,16 @@ function placeSupport(tool, px, py, angleOver) {
 //   member's end there (not the whole joint)
 //   further along a member: a new node there with a hinge (on a grid-line crossing when the cursor is near one)
 const HINGE_NODE_PX = 12, HINGE_END_PX = 28;
+// (a cable's ends are left out: a cable is always pinned at both ends. Only cables there: kind 'cable', nothing to do)
 function hingeTarget(px, py) {
+  const t = hingeTargetAny(px, py);
+  if (t && t.ends && !t.ends.length) return { kind: 'cable', node: t.node, ends: [], on: false, text: `${t.node ? `node ${t.node.id}` : 'this end'}: cables are always pinned` };
+  return t;
+}
+function hingeTargetAny(px, py) {
   const m = st.model, tp = typedLoadPos(), n = !tp && hitNode(px, py, HINGE_NODE_PX);
-  const endsAt = id => m.members.flatMap(mb => [mb.i === id ? [mb, 'hingeI'] : null, mb.j === id ? [mb, 'hingeJ'] : null]).filter(Boolean);
+  const endsAt = id => m.members.filter(mb => !mb.tensionOnly).flatMap(mb => [mb.i === id ? [mb, 'hingeI'] : null, mb.j === id ? [mb, 'hingeJ'] : null]).filter(Boolean);
+  const cableEnd = mb => (mb.tensionOnly ? [] : null); // a cable's own end: no hinge to change
   // a typed distance (as for the load tools): exactly that far from the member's start node, or from its end
   // node when negative. 0 or the full length is that member's end; in between, a new hinged node there
   if (tp) {
@@ -10314,13 +10501,13 @@ function hingeTarget(px, py) {
     if (p.d > L + 1e-9) return { kind: 'over', mb: hm.mb, on: false, text: `member ${hm.mb.id}: too far, the member is ${fLen(L)} long`, typed: tp };
     if (x < 1e-9 || x > L - 1e-9) {
       const end = x < 1e-9 ? 'hingeI' : 'hingeJ', node = nodeById(end === 'hingeI' ? hm.mb.i : hm.mb.j);
-      return { kind: 'end', mb: hm.mb, node, ends: [[hm.mb, end]], on: !hm.mb[end], text: `member ${hm.mb.id}, end at node ${node.id}: ${hm.mb[end] ? 'remove the hinge' : 'hinge'}`, typed: tp };
+      return { kind: 'end', mb: hm.mb, node, ends: cableEnd(hm.mb) || [[hm.mb, end]], on: !hm.mb[end], text: `member ${hm.mb.id}, end at node ${node.id}: ${hm.mb[end] ? 'remove the hinge' : 'hinge'}`, typed: tp };
     }
     return { kind: 'new', mb: hm.mb, at: [a.x + c * x, a.y + s * x], on: true, text: `new hinge on member ${hm.mb.id}, ${words}`, typed: tp };
   }
   if (n) {
     const ends = endsAt(n.id);
-    if (!ends.length) return null;
+    if (!ends.length) return m.members.some(mb => mb.tensionOnly && (mb.i === n.id || mb.j === n.id)) ? { kind: 'node', node: n, ends, on: false } : null;
     const on = !ends.every(([mb, e]) => mb[e]);
     return { kind: 'node', node: n, ends, on, text: `node ${n.id}: ${on ? 'hinge' : 'remove the hinge'}${ends.length > 1 ? ` (all ${ends.length} members)` : ''}` };
   }
@@ -10330,7 +10517,7 @@ function hingeTarget(px, py) {
   const L = Math.hypot(bx - ax, by - ay), dI = hm.t * L, dJ = (1 - hm.t) * L;
   if (Math.min(dI, dJ) < Math.min(HINGE_END_PX, L / 3)) { // close to an end: that end only
     const end = dI <= dJ ? 'hingeI' : 'hingeJ', node = end === 'hingeI' ? a : b;
-    return { kind: 'end', node, ends: [[hm.mb, end]], on: !hm.mb[end], text: `member ${hm.mb.id}, end at node ${node.id}: ${hm.mb[end] ? 'remove the hinge' : 'hinge'}` };
+    return { kind: 'end', node, ends: cableEnd(hm.mb) || [[hm.mb, end]], on: !hm.mb[end], text: `member ${hm.mb.id}, end at node ${node.id}: ${hm.mb[end] ? 'remove the hinge' : 'hinge'}` };
   }
   const p = snapOnMember(hm.mb, hm.t * memberFrame(hm.mb).L, true), at = [p.x, p.y];
   return { kind: 'new', mb: hm.mb, at, on: true, text: `new hinge on member ${hm.mb.id}` };
@@ -10339,6 +10526,7 @@ function placeHinge(px, py) {
   const t = hingeTarget(px, py);
   if (!t) { flash(st.typed ? 'Point at a member to put the hinge that far along it.' : 'Click a node or a member to put a hinge there.', true); return; }
   if (t.kind === 'over') { flash(t.text.replace(/^member \d+: /, 'That is ') + '.', true); return; }
+  if (t.kind === 'cable') { st.typed = ''; flash('A cable is always pinned at both ends: there is no hinge to add or remove there.'); render(); return; }
   if (st.view !== 'model' && st.view !== 'custom') document.querySelector('#view-seg [data-view="model"]').click();
   st.typed = '';
   commit(() => {
@@ -10358,6 +10546,7 @@ function placeHinge(px, py) {
 function finishDistLoad(d) {
   const mb = memberById(d.mb), D = loadDefaults(), cs = editCaseId();
   if (!mb) return;
+  if (mb.tensionOnly) { flash(cableLoadMsg(mb), true); render(); return; }
   if (st.view !== 'model' && st.view !== 'custom') document.querySelector('#view-seg [data-view="model"]').click();
   const a = Math.min(d.a, d.b), b = Math.max(d.a, d.b);
   let info, added = [];
@@ -10543,7 +10732,7 @@ function allCaseIds(m = st.model) { return [...m.cases.map(c => c.id), ...(m.com
 // largest force, moment and distributed load over all cases and combinations
 let loadMaxCache = null;
 function allLoadMaxima() {
-  const key = [st.model, st.undo.length, st.redo.length], c = loadMaxCache, live = st.drag && st.drag.kind === 'load';
+  const key = [st.model, st.undo.length, st.redo.length, st.rev], c = loadMaxCache, live = st.drag && st.drag.kind === 'load';
   if (!live && c && key.every((v, i) => v === c.key[i])) return c.mx;
   const mx = allLoadMaximaNow();
   loadMaxCache = live ? null : { key, mx };
@@ -10712,7 +10901,7 @@ function drawLoads(g, C) {
   // shown changes (a large model has thousands; a redraw then only draws the ones in view), and made afresh while a
   // load is dragged along its member or nodes are dragged (the model changes under the drag, and the undo step comes
   // only on release, so the loads would otherwise stay where they were until then).
-  const dKey = [m, st.undo.length, st.redo.length, JSON.stringify(cases)];
+  const dKey = [m, st.undo.length, st.redo.length, st.rev, JSON.stringify(cases)];
   const dragging = st.drag && (st.drag.kind === 'load' || (st.drag.kind === 'move' && st.drag.moved));
   const dHit = live && !dragging && distCache && dKey.every((v, i) => v === distCache.key[i]);
   const { dist, parts, pieces } = dHit ? distCache : (() => {
@@ -11152,10 +11341,11 @@ function drawProbe(g, C) {
 // A unit load (1 force unit, downward) is put at many points of the path; each position is one linear
 // analysis (the model's own loads are ignored), and the value of the quantity is recorded there.
 const INFL_Q = { ry: 'Ry', rx: 'Rx', mz: 'M', M: 'M', V: 'V', N: 'N' };
+// (cables are left out: the unit load runs along members, and a cable takes load only at its ends)
 function inflPathMembers() {
-  const m = st.model, chosen = st.inflPath && st.inflPath.map(memberById).filter(Boolean);
+  const m = st.model, chosen = st.inflPath && st.inflPath.map(memberById).filter(mb => mb && !mb.tensionOnly);
   if (chosen && chosen.length) return chosen;
-  return m.members.filter(mb => Math.abs(memberFrame(mb).c) > 1e-6); // vertical members (columns) are left out
+  return m.members.filter(mb => !mb.tensionOnly && Math.abs(memberFrame(mb).c) > 1e-6); // vertical members (columns) are left out
 }
 function inflTargetText(t) {
   if (!t) return '';
@@ -11174,7 +11364,8 @@ function influenceLine() {
   if (st.inflCache && st.inflCache.key === key) return st.inflCache.res;
   // every unit-load position is the same structure with a different load: the cache lets the solver factorize
   // the stiffness matrix once and only solve again for each position
-  const sm = solverModel(), opts = { shear: !!m.shearDef, axialRigid: !!m.axialRigid, cache: {} }, none = () => null;
+  // (cables: taken as ordinary pinned bars, cablesLinear, since the results of the positions are added together)
+  const sm = solverModel(), opts = { shear: !!m.shearDef, axialRigid: !!m.axialRigid, cache: {}, cablesLinear: true }, none = () => null;
   const value = (mid, pos) => {
     const loads = { node: none, member: (c, id) => (id === mid ? { points: [{ pos, dir: 'global', fx: 0, fy: -1, m: 0 }] } : null) };
     const r = FrameSolver.analyze(sm, loads, [[1, 1]], opts);
@@ -11324,9 +11515,10 @@ function setInflSection(px, py, tol) {
 }
 function panelInfluence() {
   const t = st.infl, path = inflPathMembers();
-  const pathText = st.inflPath && st.inflPath.length ? `members ${st.inflPath.join(', ')} (chosen)` : `all members except vertical ones (${path.map(mb => mb.id).join(', ') || 'none'})`;
+  const pathText = st.inflPath && st.inflPath.length ? `members ${path.map(mb => mb.id).join(', ')} (chosen)` : `all members except vertical ones${hasCables() ? ' and cables' : ''} (${path.map(mb => mb.id).join(', ') || 'none'})`;
   let h = `<h3>Influence line</h3>
-  <p class="hint">A unit load (1 ${unit('force')}, downward) moves along the load path; the line shows ${t ? '<b>' + esc(inflTargetText(t)) + '</b>' : 'the chosen quantity'} for each position of the load. The model's own loads are not used.</p>`;
+  <p class="hint">A unit load (1 ${unit('force')}, downward) moves along the load path; the line shows ${t ? '<b>' + esc(inflTargetText(t)) + '</b>' : 'the chosen quantity'} for each position of the load. The model's own loads are not used.</p>
+  ${hasCables() ? '<p class="hint" style="color:var(--danger)">The cables (tension only) are taken as ordinary truss bars here, pushing as well as pulling: an influence line adds up the effects of loads, which a cable that goes slack does not allow. Check the worst positions with load cases.</p>' : ''}`;
   if (!t) return h + `<p class="hint"><b>Click a support</b> on the drawing for a reaction, or <b>a point on a member</b> for M, V or N there.</p>`;
   const qs = t.kind === 'reaction' ? (() => { const s = (nodeById(t.node) || {}).support || {}; return ['ry', 'rx', 'mz'].filter(q => s[{ ry: 'y', rx: 'x', mz: 'r' }[q]] !== 'free'); })() : ['M', 'V', 'N'];
   h += `<div class="row" style="gap:6px;flex-wrap:wrap">${qs.map(q => `<button class="btn small${q === t.q ? ' on' : ''}" data-infl-q="${q}">${INFL_Q[q]}</button>`).join('')}</div>`;
@@ -11545,7 +11737,7 @@ function updateReadout(px, py) {
       ? `V max ${fmt(toU(q, -lerp('Vmin')))}  (${p.VminBy})\nV min ${fmt(toU(q, -lerp('Vmax')))}  (${p.VmaxBy})`
       : `${key} max ${fmt(toU(q, sv(key, lerp(key + 'max'))))}  (${p[key + 'maxBy']})\n${key} min ${fmt(toU(q, sv(key, lerp(key + 'min'))))}  (${p[key + 'minBy']})`;
     ro.textContent = head + [row('N', 'force'), row('V', 'force'), row('M', 'moment')].join('\n') + `\nunits ${unit('force')}, ${unit('moment')}`;
-  } else ro.textContent = head +
+  } else ro.textContent = head + (st.results.slack && st.results.slack.includes(hm.mb.id) ? 'slack: a cable these loads would push\n' : '') +
     `N = ${fmt(toU('force', lerp('N')))} ${unit('force')}\nV = ${fmt(toU('force', (displayOpts().flipV ? -1 : 1) * lerp('V')))} ${unit('force')}\n` +
     `M = ${fmt(toU('moment', shownM(lerp('M'))))} ${unit('moment')}\nδ = ${fdisp(Math.hypot(lerp('u'), lerp('v')))} ${unit('disp')}` +
     // with the deformed shape shown: every part of the movement, and the rotation
@@ -11682,6 +11874,7 @@ svg.addEventListener('pointerdown', e => {
     // press on a member and drag along it for a partial load; a click without dragging loads the whole member
     const t = loadTarget(px, py, false);
     if (!t) { flash('Click a member to put a distributed load on it.', true); return; }
+    if (t.mb.tensionOnly) { st.typed = ''; flash(cableLoadMsg(t.mb), true); render(); return; }
     if (t.typed) { // a typed stretch: placed at once
       if (t.over) { flash(typedTooFar(t), true); return; }
       if (t.empty) { flash('Type where the load starts and ends, e.g. 1, 3 (or just 1 to run to the end).', true); return; }
@@ -12209,6 +12402,7 @@ window.addEventListener('keydown', e => {
   else if (k === 'h') setTool('hinge');
   else if (k === 'b') { setMemberVariant('frame'); setTool('member'); }
   else if (k === 't') { setMemberVariant('truss'); setTool('member'); }
+  else if (k === 'c') { setMemberVariant('cable'); setTool('member'); }
   else if (k === 'x') setTool('delete');
   else if (k === 'd') setTool('dim');
   else if (k === 'p') setTool('force');
@@ -12356,16 +12550,21 @@ function openCtxMenu(px, py, cx, cy) {
     item(`Delete node ${n.id}`, del({ kind: 'node', id: n.id }), { danger: true });
   } else if (hm) {
     const mb = hm.mb, { L } = memberFrame(mb), p = snapOnMember(mb, hm.t * L, true), [sx, sy] = toScreen(p.x, p.y);
-    const pinned = !!(mb.hingeI && mb.hingeJ);
-    head(`Member ${mb.id}   L = ${fLen(L)}`);
+    const pinned = !!(mb.hingeI && mb.hingeJ), cable = !!mb.tensionOnly;
+    head(`Member ${mb.id}   L = ${fLen(L)}${cable ? '   cable' : ''}`);
     item('Properties', props('member', mb.id));
-    item('Beam solver', () => { selectOnly('member', mb.id); renderPanel(); render(); openBeam(st.sel.members); });
+    if (!cable) item('Beam solver', () => { selectOnly('member', mb.id); renderPanel(); render(); openBeam(st.sel.members); });
     sep();
     item('Add a node here', () => commit(() => { const k = nodeAt(p.x, p.y) || splitMember(mb, p.x, p.y); selectOnly('node', k.id); }));
-    item(pinned ? 'Make both ends rigid' : 'Pin both ends (truss member)', () => commit(() => { mb.hingeI = !pinned; mb.hingeJ = !pinned; }));
-    sep();
-    item('Add a point load here', () => menuPlaceLoad('force', sx, sy));
-    item('Add a distributed load', () => finishDistLoad({ mb: mb.id, a: 0, b: 0, moved: false }), { note: 'whole member' });
+    // a cable is always pinned, and takes no load along its length
+    if (cable) item('Make it a truss bar (it can push too)', () => commit(() => { delete mb.tensionOnly; }));
+    else {
+      item(pinned ? 'Make both ends rigid' : 'Pin both ends (truss member)', () => commit(() => { mb.hingeI = !pinned; mb.hingeJ = !pinned; }));
+      if (!loadedAlongIn(mb).length) item('Make it a cable (tension only)', () => commit(() => { mb.tensionOnly = true; }));
+      sep();
+      item('Add a point load here', () => menuPlaceLoad('force', sx, sy));
+      item('Add a distributed load', () => finishDistLoad({ mb: mb.id, a: 0, b: 0, moved: false }), { note: 'whole member' });
+    }
     sep();
     item('Grid through this point', gridHere(p.x, p.y, `a point on member ${mb.id}`));
     item(`Delete member ${mb.id}`, del({ kind: 'member', id: mb.id }), { danger: true });
@@ -12688,7 +12887,7 @@ function panelProps() {
   if (!nodes.length && !mbs.length && dms.length) return panelDims(dms);
   if (!nodes.length && !mbs.length) {
     return `<h3>Getting started</h3>
-      <p class="hint"><b>Draw:</b> pick Frame bar (B, joined rigidly) or Truss bar (T, pinned at both ends) from the Members group and click from point to point; Esc ends a chain. Clicking on an existing member splits it there.
+      <p class="hint"><b>Draw:</b> pick Frame bar (B, joined rigidly), Truss bar (T, pinned at both ends) or Cable (C, tension only) from the Members group and click from point to point; Esc ends a chain. Clicking on an existing member splits it there.
       The length and angle show next to the cursor. For an exact length, type it (for example 12.5) and press Enter or click: the node is placed that far toward the cursor, where the preview shows it.
       Add an angle with Tab or &lt; (12.5&lt;30, counterclockwise from horizontal; Tab switches back and forth between the length and the angle) or a slope (12.5&lt;4:12, the way the cursor points), or type Δx, Δy (12, 4). A direction on its own (&lt;30 or 4:12) and Enter locks it: click along it, or type a length.</p>
       <p class="hint"><b>Dimension:</b> pick the dimension tool (D), click two points, then click where the line goes. Press H, V or A while placing it for a horizontal, vertical or aligned dimension. Dimensions on nodes follow them when they move.</p>
@@ -12744,6 +12943,10 @@ function panelProps() {
   if (mbs.length) {
     const mb = mbs[0], multi = mbs.length > 1;
     const L = (caseLoads(caseId) || { members: {} }).members[mb.id] || {};
+    // cables (tension only): every selected member one (cab), or some; a cable takes no load along its length, so its
+    // load boxes are shown only to clear loads it has (cabLoaded), and in a mix the loads typed go on the others
+    const cab = mbs.every(x => x.tensionOnly), someCab = mbs.some(x => x.tensionOnly);
+    const cabLoaded = cab && mbs.some(x => FrameSolver.cableLoadKind((caseLoads(caseId) || { members: {} }).members[x.id]));
     const u = L.uniform || { dir: 'global', qx: 0, qy: 0 }, ln = L.linear || { dir: 'global', qx1: 0, qy1: 0, qx2: 0, qy2: 0 }, th = L.thermal || { top: 0, bottom: 0 };
     const { L: len } = memberFrame(mb);
     // distributed loads can also be global per projected length (proj): qy per horizontal metre, qx per vertical metre
@@ -12754,10 +12957,15 @@ function panelProps() {
       <label for="m-sec">Section</label><select id="m-sec">${opt('', '— none —', mb.section)}${st.model.sections.map(x => opt(x.id, x.name, mb.section)).join('')}</select><span></span>
     </div>
     <div class="row">
-      <label class="chk"><input type="checkbox" id="m-hi" ${mb.hingeI ? 'checked' : ''}> Hinge at start</label>
-      <label class="chk"><input type="checkbox" id="m-hj" ${mb.hingeJ ? 'checked' : ''}> Hinge at end</label>
+      <label class="chk"${cab ? ' title="A cable is always pinned at both ends"' : ''}><input type="checkbox" id="m-hi" ${mb.hingeI || cab ? 'checked' : ''} ${cab ? 'disabled' : ''}> Hinge at start</label>
+      <label class="chk"${cab ? ' title="A cable is always pinned at both ends"' : ''}><input type="checkbox" id="m-hj" ${mb.hingeJ || cab ? 'checked' : ''} ${cab ? 'disabled' : ''}> Hinge at end</label>
     </div>
-    ${(() => { // deformation constraints, as Ftool's: flexible (axial, shear) or rigid
+    <div class="box" data-box="cable"><h3>Cable</h3>
+      <div class="row"><label class="chk" title="A cable or rod brace: it pulls, but goes slack instead of pushing"><input type="checkbox" id="m-cable" ${cab ? 'checked' : ''}> Tension only (a cable or rod)${someCab && !cab ? ' <span class="hint">(some)</span>' : ''}</label></div>
+      <p class="hint">${someCab ? `It pulls, and goes slack (no force) where the loads would push it, as rod bracing does. Each load case and combination is analysed on its own until every cable is taut or slack. Pinned at both ends, straight: no sag or pretension. Its own weight goes half to each end; other loads go on its nodes.${cab ? '' : ' The settings below leave cables out.'}`
+        : 'Tick for a member that can only pull, such as a cable or a rod brace (no load along it).'}</p>
+    </div>
+    ${cab ? '' : (() => { // deformation constraints, as Ftool's: flexible (axial, shear) or rigid
       const ds = mbs.map(x => memberDeform(x)), all = k => ds.every(k), some = k => ds.some(k);
       const mixed = (k) => some(k) && !all(k) ? ' <span class="hint">(some)</span>' : '';
       const rigid = all(d => d.rigid), flex = all(d => !d.rigid);
@@ -12772,6 +12980,9 @@ function panelProps() {
       <span class="hint">${multi ? `Each selected member is turned round.` : `Start node ${mb.i} → end node ${mb.j}`}</span></div>
     ${(() => { const ch = beamChain(st.sel.members); return `<div class="row"><button class="btn small" id="m-beam" ${ch.error ? `disabled title="${esc(ch.error)}"` : 'title="Open the beam solver for the selected member(s)"'}>Beam solver…</button>
       <span class="hint">${ch.error ? (multi ? 'The selected members are not one straight beam.' : '') : multi ? `Solve members ${ch.members.map(o => o.mb.id).join(', ')} as one beam (${fLen(ch.L)}).` : 'Reactions, shear, moment and deflection of this member as a beam.'}</span></div>`; })()}
+    ${cab && !cabLoaded ? `<p class="hint">A cable takes load only at its ends: put loads on ${multi ? 'its nodes' : `node ${mb.i} or ${mb.j}`}.</p>` : `
+    ${cabLoaded ? `<p class="hint" style="color:var(--danger)">A cable takes no load along its length, so the model cannot be analysed with ${multi ? 'these loads' : 'this load'} on it: clear ${multi ? 'them' : 'it'} below (or untick Tension only).</p>` : ''}
+    ${someCab && !cab ? '<p class="hint">Loads typed here go on the selected members that are not cables.</p>' : ''}
     <div class="box" data-load="uniform"><h3>Uniform load · ${esc(caseName)}</h3>
       <div class="fields">
         <label for="u-dir">Direction</label>${dirSel('u-dir', u.dir)}<span></span>
@@ -12795,7 +13006,7 @@ function panelProps() {
         <label for="t-bot">Bottom face</label>${qin('t-bot', 'temp', th, 'bottom')}<span class="unit">${unit('temp')}</span>
       </div>
       <p class="hint">"Top" is the left side when looking from the start node to the end node.</p>
-    </div>
+    </div>`}
     <button class="btn danger" id="m-del">Delete ${multi ? 'members' : 'member'}</button>`;
   }
   if (dms.length) h += `<p class="hint">${dms.length} dimension line${dms.length > 1 ? 's are' : ' is'} also selected and will be deleted with the selection.</p>`;
@@ -12892,6 +13103,7 @@ function onPointLoadClick(t) {
   if (!mb || st.sel.members.size !== 1) return false;
   const act = t.dataset.act, i = Number(t.dataset.i), len = memberFrame(mb).L, us = st.units === 'US';
   const ml = () => { const L = caseLoads(editCaseId(), true); return (L.members[mb.id] = L.members[mb.id] || {}); };
+  if (mb.tensionOnly && (act === 'pt-add' || act === 'pa-add')) { flash(cableLoadMsg(mb), true); return true; }
   if (act === 'pt-add') commit(() => { const L = ml(); (L.points = L.points || []).push({ id: uid(), pos: len / 2, dir: 'global', fx: 0, fy: -10 * (us ? KIP : 1), m: 0 }); });
   else if (act === 'pa-add') commit(() => { const L = ml(), q = us ? -KIP / FT : -10; (L.partials = L.partials || []).push({ id: uid(), dir: 'global', a: 0, b: len / 2, qx1: 0, qy1: q, qx2: 0, qy2: q }); });
   else if (act === 'pt-del') commit(() => { ml().points.splice(i, 1); });
@@ -12940,6 +13152,18 @@ panel.addEventListener('change', e => {
         evalExpr(t.value, n => (paramByName(n) ? paramByName(n).v : 1));
       } catch (err) { t.classList.add('bad'); flash(err.message, true); return; }
     }
+    // Tension only: not for a member with a load along it (a cable cannot take one): say where, and change nothing
+    if (id === 'm-cable' && v) {
+      const loaded = mbs.map(x => [x, loadedAlongIn(x)]).filter(([, cs]) => cs.length);
+      if (loaded.length) {
+        const [x, cs] = loaded[0];
+        flash(`Member ${x.id} has a load along it (${cs.map(c => `"${c}"`).join(', ')}), and a cable takes load only at its ends. Remove ${loaded.length > 1 || cs.length > 1 ? 'those loads' : 'that load'} first, or put ${loaded.length > 1 || cs.length > 1 ? 'them' : 'it'} on a node.`, true);
+        renderPanel(); return;
+      }
+    }
+    // a member in a selection that also has cables: the cables keep their pins, their axial stretch and no loads along them
+    const CABLE_SKIP = ['m-hi', 'm-hj', 'm-rigid', 'm-flex', 'm-axial', 'm-shear'], LOAD_ID = /^(u-|li-|t-top$|t-bot$)/;
+    const mixed = mbs.some(x => x.tensionOnly) && mbs.some(x => !x.tensionOnly);
     commit(() => {
       for (const name of missing) (st.model.params = st.model.params || []).push({ id: newId('param'), name, v: 1 }); // same undo step as the load
       for (const n of nodes) {
@@ -12957,7 +13181,9 @@ panel.addEventListener('change', e => {
       }
       for (const mb of mbs) {
         const ml = () => { const L = caseLoads(caseId, true); return (L.members[mb.id] = L.members[mb.id] || {}); };
-        if (id === 'm-mat') mb.material = v ? Number(v) : null;
+        if (mb.tensionOnly && (CABLE_SKIP.includes(id) || (mixed && LOAD_ID.test(id)))) continue;
+        if (id === 'm-cable') { if (v) mb.tensionOnly = true; else delete mb.tensionOnly; } // (tidyCables pins it)
+        else if (id === 'm-mat') mb.material = v ? Number(v) : null;
         else if (id === 'm-sec') mb.section = v ? Number(v) : null;
         else if (id === 'm-hi') mb.hingeI = v; else if (id === 'm-hj') mb.hingeJ = v;
         // deformation: a value that is the model's default is not kept, so the member follows the default
@@ -13548,7 +13774,7 @@ function steelChecks() {
         if (!cur || res.ratio > cur.res.ratio) members.set(mb.id, { wood: true, res, run: run.name, types: time.types, mat: c.mat, sec: c.sec, from: c.from, grade: c.grade, past: runsOnPast(mb, m), runIds: runsBy.get(mb.id).members.map(x => x.id) });
         continue;
       }
-      res = Design.checkSteelMember(c.sec.dims, { E: c.mat.E, Fy: c.Fy }, memberFrame(mb).L, sts, { ...(mb.design || {}), runL, method, cantilever: isCantilever(mb, m) });
+      res = Design.checkSteelMember(c.sec.dims, { E: c.mat.E, Fy: c.Fy }, memberFrame(mb).L, sts, { ...(mb.design || {}), runL, method, cantilever: isCantilever(mb, m), tensionOnly: !!mb.tensionOnly });
       if (!cur || res.ratio > cur.res.ratio) members.set(mb.id, { res, run: run.name, fyFrom: c.fyFrom, mat: c.mat, sec: c.sec, past: runsOnPast(mb, m), runIds: runsBy.get(mb.id).members.map(x => x.id) });
     }
   }
@@ -13570,7 +13796,7 @@ function straightRun(mb, m = st.model) {
     const others = m.members.filter(x => x !== from && (x.i === node || x.j === node));
     if (others.length !== 1) return null;
     const f = memberFrame(from), o = memberFrame(others[0]);
-    return Math.abs(f.c * o.s - f.s * o.c) < 0.02 ? others[0] : null;
+    return Math.abs(f.c * o.s - f.s * o.c) < 0.02 && !from.tensionOnly === !others[0].tensionOnly ? others[0] : null; // (a cable and a bar in line are two runs)
   };
   const list = [mb], seen = new Set([mb.id]), walk = (node, add) => {
     let cur = mb;
@@ -13590,6 +13816,9 @@ function addDeflections(m, members) {
   const Ds = m.cases.filter(c => typeOf(c) === 'D'), others = m.cases.filter(c => !['D', 'W', 'E'].includes(typeOf(c))); // (wind and earthquake have limits of their own)
   const per = new Map();
   for (const c of m.cases) { try { per.set(c.id, analyzeFor(c.id).stations); } catch (e) { /* (the strength check reports it) */ } }
+  // with cables, cases analysed together (see below), each set of factors once
+  const cab = hasCables(m), byFactors = new Map();
+  const runOf = fs => { const k = JSON.stringify(fs); if (!byFactors.has(k)) { let S = null; try { S = analyzeFor(fs).stations; } catch (e) { /* left out */ } byFactors.set(k, S); } return byFactors.get(k); };
   const done = new Set();
   for (const mb of m.members) {
     const c0 = members.get(mb.id);
@@ -13600,10 +13829,10 @@ function addDeflections(m, members) {
     // set by hand in the Design tab (for the whole run: Check wins), or by default only beams and rafters: a column
     // or a stud (steeper than 60°) has no deflection limit here
     const mode = deflMode(run.members);
-    if (mode === 'off' || (mode === 'auto' && !deflAuto(run))) continue;
-    // each case's displacement across the run at every station (stations share positions across cases)
-    const field = id => {
-      const S = per.get(id), pts = [];
+    if (mode === 'off' || (mode === 'auto' && (!deflAuto(run) || run.members.some(x => x.tensionOnly)))) continue; // (nor a cable)
+    // an analysis's displacement across the run at every station (stations share positions across analyses)
+    const field = S => {
+      const pts = [];
       if (!S) return null;
       for (const x of run.members) {
         const sts = S.get(x.id), f = memberFrame(x);
@@ -13615,26 +13844,49 @@ function addDeflections(m, members) {
       }
       return pts;
     };
-    const fields = new Map(m.cases.map(cs => [cs.id, field(cs.id)]));
-    if ([...fields.values()].some(f => !f)) continue;
-    const ref = fields.get(m.cases[0].id), ts = ref.map(p => p.t);
+    const fields = new Map(m.cases.map(cs => [cs.id, field(per.get(cs.id))]));
+    if (!cab && [...fields.values()].some(f => !f)) continue;
+    const D1 = Ds.map(cs => [cs.id, 1]);
+    const ref = cab ? field(runOf(D1.length ? D1 : [[(others[0] || m.cases[0]).id, 1]])) : fields.get(m.cases[0].id);
+    if (!ref) continue;
+    const ts = ref.map(p => p.t);
     const i0 = ts.indexOf(Math.min(...ts)), i1 = ts.indexOf(Math.max(...ts)), cant = run.freeA || run.freeB, Lchk = cant ? 2 * run.L : run.L;
     // relative to the chord between the run's ends, or for a cantilever to its root
     const rel = f => f.map((p, k) => p.w - (cant ? f[run.freeA ? i1 : i0].w : f[i0].w + (f[i1].w - f[i0].w) * (p.t - ts[i0]) / ((ts[i1] - ts[i0]) || 1)));
-    const zero = ts.map(() => 0), dD = Ds.reduce((acc, cs) => acc.map((v, k) => v + rel(fields.get(cs.id))[k]), zero);
-    const dO = others.map(cs => ({ cs, d: rel(fields.get(cs.id)) }));
-    const peak = arr => arr.reduce((b, v, k) => (Math.abs(v) > b.d ? { d: Math.abs(v), t: ts[k] - ts[i0] } : b), { d: 0, t: 0 });
+    const zero = ts.map(() => 0), peak = arr => arr.reduce((b, v, k) => (Math.abs(v) > b.d ? { d: Math.abs(v), t: ts[k] - ts[i0] } : b), { d: 0, t: 0 });
+    // the deflection of an analysis of these factors, relative as above (null if it cannot be analysed)
+    const relOf = fs => { const f = field(runOf(fs)); return f && rel(f); };
     for (const x of run.members) {
       const c = members.get(x.id);
       if (!c || !c.res) continue;
       const Kcr = creepK(c, m);
-      let live = { d: 0, t: 0, case: null }, total = { ...peak(dD.map(v => Kcr * v)), case: null };
-      for (const { cs, d } of dO) {
-        const pl = peak(d); if (pl.d > live.d) live = { ...pl, case: cs.name };
-        const pt = peak(d.map((v, k) => Kcr * dD[k] + v)); if (pt.d > total.d) total = { ...pt, case: cs.name };
+      let live = { d: 0, t: 0, case: null }, total = { d: 0, t: 0, case: null };
+      if (!cab) { // a linear structure: the cases add up
+        const dD = Ds.reduce((acc, cs) => acc.map((v, k) => v + rel(fields.get(cs.id))[k]), zero);
+        total = { ...peak(dD.map(v => Kcr * v)), case: null };
+        for (const cs of others) {
+          const d = rel(fields.get(cs.id));
+          const pl = peak(d); if (pl.d > live.d) live = { ...pl, case: cs.name };
+          const pt = peak(d.map((v, k) => Kcr * dD[k] + v)); if (pt.d > total.d) total = { ...pt, case: cs.name };
+        }
+      } else {
+        // With cables they do not: a cable taut under one load may be slack under another. So dead load and each other
+        // case are analysed together: live (D + case) − D, total Kcr·D + case (the creep factor on the dead load itself).
+        // For a linear structure these are the sums above.
+        const DK = Ds.map(cs => [cs.id, Kcr]), dD1 = D1.length ? relOf(D1) : zero, dDK = DK.length ? relOf(DK) : zero;
+        if (!dD1 || !dDK) continue;
+        total = { ...peak(dDK), case: null };
+        let bad = false;
+        for (const cs of others) {
+          const both = relOf([...D1, [cs.id, 1]]), crept = relOf([...DK, [cs.id, 1]]);
+          if (!both || !crept) { bad = true; break; }
+          const pl = peak(both.map((v, k) => v - dD1[k])); if (pl.d > live.d) live = { ...pl, case: cs.name };
+          const pt = peak(crept); if (pt.d > total.d) total = { ...pt, case: cs.name };
+        }
+        if (bad) continue;
       }
       const rL = live.d / (Lchk / lim.live), rT = total.d / (Lchk / lim.total);
-      const defl = { live, total, Kcr, Lchk, cant, run: run.members.map(y => y.id), runL: run.L, from: run.A.id, lim, hasD: Ds.length > 0, forced: mode === 'on', ratio: Math.max(rL, rT), which: rL >= rT ? 'live' : 'total' };
+      const defl = { live, total, Kcr, Lchk, cant, run: run.members.map(y => y.id), runL: run.L, from: run.A.id, lim, hasD: Ds.length > 0, forced: mode === 'on', together: cab, ratio: Math.max(rL, rT), which: rL >= rT ? 'live' : 'total' };
       c.res.defl = defl;
       c.res.strength = c.res.ratio;
       if (defl.ratio > c.res.ratio) { c.res.ratio = defl.ratio; c.res.governs = 'deflection'; }
@@ -13649,9 +13901,10 @@ function deflWorking(r) {
   return `<h3>Deflection (service loads)</h3>
   <div class="eqs">
     Over ${d.run.length > 1 ? `members ${d.run.join(', ')} in line` : `member ${d.run[0]}`}: L = ${d.cant ? `2 × ${Lq(d.runL)} (cantilever) = ` : ''}${Lq(d.Lchk)}, measured from ${d.cant ? 'the root' : 'the chord between its ends'}${d.forced ? ' (checked as set in the Design tab)' : ''}<br>
-    Live (each gravity load case other than dead load, alone): Δ = ${D(d.live.d)}${n(d.live.d)}${d.live.case ? ` under ${esc(d.live.case)}, ${Lq(d.live.t)} from node ${d.from}` : ''} ≤ L/${d.lim.live} = ${D(d.Lchk / d.lim.live)} → ratio ${(d.live.d / (d.Lchk / d.lim.live)).toFixed(3)}<br>
+    Live (each gravity load case other than dead load${d.together ? ', as (dead + that case) − dead' : ', alone'}): Δ =${D(d.live.d)}${n(d.live.d)}${d.live.case ? ` under ${esc(d.live.case)}, ${Lq(d.live.t)} from node ${d.from}` : ''} ≤ L/${d.lim.live} = ${D(d.Lchk / d.lim.live)} → ratio ${(d.live.d / (d.Lchk / d.lim.live)).toFixed(3)}<br>
     Total (${d.Kcr !== 1 ? `K<sub>cr</sub> ${d.Kcr} × ` : ''}dead load${d.live.case || d.total.case ? ' + each other case' : ''}): Δ = ${D(d.total.d)}${n(d.total.d)} ≤ L/${d.lim.total} = ${D(d.Lchk / d.lim.total)} → ratio ${(d.total.d / (d.Lchk / d.lim.total)).toFixed(3)}
     ${d.hasD ? '' : '<br><span class="hint">No load case is dead load (D): give the cases their types under Load → ASCE 7… so the total takes them.</span>'}
+    ${d.together ? '<br><span class="hint">With cables in the model the load cases do not add up (a cable taut under one may be slack under another), so dead load and each case are analysed together, the creep factor on the dead load itself.</span>' : ''}
   </div>`;
 }
 // a warning when the combinations were made for the other method (LRFD loads against ASD strengths, or back)
@@ -13731,7 +13984,7 @@ function deflBox() {
   const lim = deflLimits(), mbs = [...st.sel.members].map(memberById).filter(Boolean);
   // the selected members' setting: Auto (by slope), Check or Don't check; blank when they differ
   const cur = ['auto', 'on', 'off'].find(k => mbs.length && mbs.every(x => ((x.design || {}).defl || 'auto') === k)) || '';
-  const autoWord = mbs.length === 1 ? (deflAuto(straightRun(mbs[0])) ? 'checked: a beam' : 'not checked: steeper than 60°') : 'by slope';
+  const autoWord = mbs.length === 1 ? (mbs[0].tensionOnly ? 'not checked: a cable' : deflAuto(straightRun(mbs[0])) ? 'checked: a beam' : 'not checked: steeper than 60°') : 'by slope';
   const pick = mbs.length ? `<label for="md-defl" title="Auto: beams and rafters (not steeper than 60°) are checked, columns and studs are not. Check or Don't check overrides it for a sloped brace, a leaning column that carries a beam, and so on. A member in a straight run with others sets the whole run (Check wins).">${mbs.length > 1 ? 'Selected' : 'Member ' + mbs[0].id}</label><select id="md-defl">${cur ? '' : '<option value="" selected>(differ)</option>'}${opt('auto', 'Auto (' + autoWord + ')', cur)}${opt('on', 'Check', cur)}${opt('off', 'Don\'t check', cur)}</select><span></span>` : '';
   return `<div class="box"><h3>Deflection</h3>
     <label class="chk" title="Service loads: each gravity load case unfactored, over the straight run of members between supports or joints"><input type="checkbox" id="df-on" ${lim.on ? 'checked' : ''}> Check deflection of steel and wood beams</label>
@@ -14165,11 +14418,12 @@ function panelResults() {
   return `<h3>Results · ${esc(caseName || '')}</h3>
   <div class="tablewrap"><table class="res"><tr><th>Member</th><th>max N</th><th>max V</th><th>max M</th><th>δ ${uD}</th></tr>${rows}</table></div>
   <p class="hint">N, V in ${uF}; M in ${uM}.</p>
+  ${R.slack && R.slack.length ? `<p class="hint">Slack: ${R.slack.length === 1 ? 'member' : 'members'} ${R.slack.join(', ')}, ${R.slack.length === 1 ? 'a cable' : 'cables'} these loads would push, so ${R.slack.length === 1 ? 'it carries' : 'they carry'} nothing (dashed on the drawing).</p>` : ''}
   <h3>Reactions</h3><div class="tablewrap"><table class="res"><tr><th>Node</th><th>Rx ${uF}</th><th>Ry ${uF}</th><th>M ${uM}</th></tr>${reac}
   <tr><td>Sum</td><td>${F(sum[0])}</td><td>${F(sum[1])}</td><td></td></tr></table></div>
   <h3>Node displacements</h3><div class="tablewrap"><table class="res"><tr><th>Node</th><th>ux ${uD}</th><th>uy ${uD}</th><th>rz rad</th></tr>${disp}</table></div>
   <div class="row"><button class="btn small" data-act="show-steps">Show step-by-step solution</button></div>
-  <p class="hint">Hover a member in the N, V, M or Deformed view to read values at any point. Results are first-order linear elastic, ${deformSummary() || 'Euler-Bernoulli members (no shear deformation) that stretch and shorten under axial force'}.${deformSummary() ? ' Each member\'s deformation is in Properties ▸ Deformation.' : ''}</p>`;
+  <p class="hint">Hover a member in the N, V, M or Deformed view to read values at any point. Results are first-order linear elastic, ${deformSummary() || 'Euler-Bernoulli members (no shear deformation) that stretch and shorten under axial force'}.${deformSummary() ? ' Each member\'s deformation is in Properties ▸ Deformation.' : ''}${R.cableRounds ? ` The cables (tension only) were found taut or slack in ${R.cableRounds} round${R.cableRounds === 1 ? '' : 's'} of analysis.` : ''}</p>`;
 }
 // envelope tables: per member the max / min of N, V, M with the governing run, then reactions
 function envelopeTablesHTML(R, wrapCls, tableCls) {
@@ -14327,7 +14581,7 @@ function toolPrompt() {
     case 'node': return st.typed ? 'Node: Enter places it at the typed x, y (@dx, dy: from the last node) · Esc clears'
       : 'Node: click to add one (on a member it splits it) · or type x, y · click a support to remove it';
     case 'member': {
-      const kind = memberVariant() === 'truss' ? 'Truss bar (pinned ends)' : 'Frame bar';
+      const kind = { truss: 'Truss bar (pinned ends)', cable: 'Cable (tension only, pinned ends)' }[memberVariant()] || 'Frame bar';
       return !st.pending ? `${kind}: click the first end (a node, a point on a member, or anywhere)`
         : lockedDir() ? `${kind}: click along the locked line, or type a length · Esc unlocks`
         : `${kind}: click the other end, or type a length (Tab: angle) · Shift locks the direction · Esc ends the chain`;
@@ -14623,6 +14877,7 @@ function exportFtl() {
   const loadName = (L, fallback) => (L && L.name ? String(L.name).replace(/'/g, '') : fallback);
   const dedupe = (list, key, make) => { const k = key; let i = list.findIndex(x => x._k === k); if (i < 0) { list.push({ ...make(), _k: k }); i = list.length - 1; } return i + 1; };
   const caseIdx = m.cases.map(c => c.id);
+  if (m.members.some(mb => mb.tensionOnly)) notes.push('Cables (tension only) are written as members pinned at both ends: the file has no tension-only setting, so Ftool takes them as ordinary truss bars, which can push too.');
   m.members.forEach((mb, k) => {
     const blk = fr.member(k), rev = fr.memberStartsAt(k) !== nIdx.get(mb.i);
     blk.material = mb.material ? m.materials.findIndex(x => x.id === mb.material) + 1 : 0;
@@ -14706,6 +14961,19 @@ function mxHTML(rows, cols, cell, opts = {}) {
   return `<div class="mxwrap"><table class="mx">${opts.caption ? `<caption>${opts.caption}</caption>` : ''}${head}${body}</table></div>`;
 }
 const MAX_SHOWN_DOF = 60;
+// With cables (tension only), what the matrices below are: those of the last of the analyses that found which
+// cables are slack, with the slack ones left out (or, where the structure would otherwise swing freely in a
+// direction no load pushes it, kept with a tiny stiffness)
+function cableStepsNote(r) {
+  const m = st.model, cables = m.members.filter(mb => mb.tensionOnly).map(mb => mb.id);
+  if (!cables.length) return '';
+  const sl = r.slack || [], one = sl.length === 1, list = ids => (ids.length === 1 ? `member ${ids[0]}` : `members ${ids.join(', ')}`);
+  const kept = r.trace && r.trace.elems.some(el => el.slack && el.A > 0);
+  return `<p><b>Cables.</b> ${list(cables)} ${cables.length === 1 ? 'is a cable' : 'are cables'} (tension only): pinned at both ends, ${cables.length === 1 ? 'it pulls' : 'they pull'} but cannot push.
+  Which ones are slack depends on the loads, so the analysis was repeated (${r.cableRounds} round${r.cableRounds === 1 ? '' : 's'}): every cable starts taut, one in compression goes slack, and a slack one whose ends move apart is taut again, until nothing changes.
+  ${sl.length ? `Under these loads ${list(sl)} ${one ? 'is' : 'are'} slack and carr${one ? 'ies' : 'y'} nothing: ${kept ? `${one ? 'it is' : 'they are'} kept below with a tiny stiffness (a hundred-millionth of a typical member's EA/L), since without ${one ? 'it' : 'them'} the structure could swing in a direction no load pushes it` : `${one ? 'it is' : 'they are'} left out of the matrices below (no stiffness)`}.` : 'Under these loads every cable is taut.'}
+  The matrices are those of the last analysis.${activeHasSW() ? ' A cable\'s own weight is in the nodal loads, half at each end.' : ''}</p>`;
+}
 
 function stepsHTML() {
   const m = st.model;
@@ -14726,7 +14994,7 @@ function stepsHTML() {
   const LOC = ['u<sub>i</sub>', 'v<sub>i</sub>', 'θ<sub>i</sub>', 'u<sub>j</sub>', 'v<sub>j</sub>', 'θ<sub>j</sub>'];
   const fu = U.fu, lu = U.lu;
   const caseName = typeof st.activeCase === 'number' ? (m.cases.find(c => c.id === st.activeCase) || {}).name : (m.combos.find(c => 'c' + c.id === st.activeCase) || {}).name;
-  let h = '';
+  let h = cableStepsNote(r);
 
   // 1. numbering
   h += `<h3>1. Degrees of freedom</h3>
@@ -14912,6 +15180,17 @@ function nodeLoadsOf(m) {
     member: (c, id) => { const L = m.loads[c]; return L && L.members[id]; },
   };
 }
+// The truss the hand methods work on. With cables (tension only), those the loads leave slack are taken out: they carry
+// nothing. Which they are comes from the stiffness solver, every joint pinned, as the hand methods take them.
+function handTruss(m) {
+  const sm = solverModel(m), factors = factorsFor(st.activeCase), loads = nodeLoadsOf(m);
+  if (!m.members.some(mb => mb.tensionOnly)) return { sm, factors, loads, slack: [], error: null };
+  let slack = [];
+  try { slack = FrameSolver.analyze({ ...sm, members: sm.members.map(mb => ({ ...mb, hingeI: true, hingeJ: true })) }, loads, factors, { caseNames: caseNamesOf(m) }).slack; } catch (e) { return { sm, factors, loads, slack, error: e.message }; }
+  const out = new Set(slack), members = sm.members.filter(mb => !out.has(mb.id)), used = new Set(members.flatMap(mb => [mb.i, mb.j]));
+  return { sm: { ...sm, members, nodes: sm.nodes.filter(n => used.has(n.id)) }, factors, loads, slack, error: null };
+}
+const slackTrussNote = slack => (slack.length ? `<ul class="jt-notes"><li>${slack.length === 1 ? `Member ${slack[0]} is a cable` : `Members ${slack.join(', ')} are cables`} (tension only) these loads would push, so ${slack.length === 1 ? 'it is' : 'they are'} slack and carr${slack.length === 1 ? 'ies' : 'y'} nothing: left out below.</li></ul>` : '');
 // the note for the hand truss methods when self-weight is included
 const swTrussNote = () => (activeHasSW() ? `<ul class="jt-notes"><li>Self-weight is included: each member's weight γ·A·L is put half at each end joint, as a truss is idealised (total ${fq('force', selfWeightTotal().W)}). The loads at the joints below include it.</li></ul>` : '');
 const ARROWS8 = ['→', '↗', '↑', '↖', '←', '↙', '↓', '↘'];
@@ -15056,7 +15335,8 @@ function trussOverview(R, U) {
 function jointsHTML() {
   const m = st.model, U = stepUnits(), fu = U.fu;
   const caseName = typeof st.activeCase === 'number' ? (m.cases.find(c => c.id === st.activeCase) || {}).name : (m.combos.find(c => 'c' + c.id === st.activeCase) || {}).name;
-  const sm = solverModel(m), factors = factorsFor(st.activeCase), loads = nodeLoadsOf(m);
+  const { sm, factors, loads, slack, error: cabErr } = handTruss(m);
+  if (cabErr) return `<p class="hint" style="color:var(--danger)">Cannot analyse: ${esc(cabErr)}</p>`;
   const R = TrussJoints.analyzeJoints(sm, loads, factors, { memberLoadLocal: FrameSolver.memberLoadLocal });
   const c = R.count || { m: sm.members.length, r: 0, j: sm.nodes.length };
   $('#steps-case').textContent = `Load case: ${caseName || ''} · ${c.j} joints, ${c.m} members`;
@@ -15072,6 +15352,7 @@ function jointsHTML() {
     h += `<p>Members m = ${c.m}, reaction components r = ${c.r}, joints j = ${c.j}. Each joint gives 2 equations, so there are 2j = ${2 * c.j} equations for m + r = ${c.m + c.r} unknowns.
     ${ok ? `m + r = 2j, and the ${2 * c.j} equations are independent: the truss is <b>statically determinate and stable</b> <span class="jt-ok">✓</span>` : ''}</p>`;
   }
+  h += slackTrussNote(slack);
   if (R.problems.length) return h + `<ul class="jt-problems">${R.problems.map(p => `<li>${esc(p)}</li>`).join('')}</ul>`;
   if (R.notes.length) h += `<ul class="jt-notes">${R.notes.map(p => `<li>${esc(p)}</li>`).join('')}</ul>`;
   h += swTrussNote();
@@ -15325,9 +15606,10 @@ const listIds = ids => (ids.length > 10 ? `${ids.slice(0, 10).join(', ')}, …` 
 function sectionsHTML() {
   const m = st.model, U = stepUnits(), fu = U.fu;
   const caseName = typeof st.activeCase === 'number' ? (m.cases.find(c => c.id === st.activeCase) || {}).name : (m.combos.find(c => 'c' + c.id === st.activeCase) || {}).name;
-  const sm = solverModel(m), factors = factorsFor(st.activeCase), loads = nodeLoadsOf(m);
+  const { sm, factors, loads, slack, error: cabErr } = handTruss(m);
+  if (cabErr) return `<p class="hint" style="color:var(--danger)">Cannot analyse: ${esc(cabErr)}</p>`;
   const sec = st.section || (st.section = { cut: [], line: null, keepJoint: null });
-  sec.cut = sec.cut.filter(id => m.members.some(mb => mb.id === id));
+  sec.cut = sec.cut.filter(id => sm.members.some(mb => mb.id === id)); // (a slack cable is not part of the truss)
   const R = TrussJoints.analyzeSection(sm, loads, factors, sec.cut, { memberLoadLocal: FrameSolver.memberLoadLocal, keepJoint: sec.keepJoint });
   $('#steps-case').textContent = `Load case: ${caseName || ''} · ${sm.nodes.length} joints, ${sm.members.length} members`;
   let pi = 0;
@@ -15335,7 +15617,7 @@ function sectionsHTML() {
   let h = `<p>The method of sections cuts the truss in two and treats one side as a free body. The cut members' forces act on it from outside,
   drawn pulling away from the side (assumed in <b>tension</b>, so a negative answer means <b>compression</b>). One free body gives three equations,
   ΣF<sub>x</sub> = 0, ΣF<sub>y</sub> = 0 and ΣM = 0, so a cut should go through at most three members whose forces aren't known.
-  Each force is found from an equation the other unknowns drop out of: <b>moments about the point where their lines meet</b>. Forces in <b>${fu}</b>, lengths in <b>${U.lu}</b>.</p>`;
+  Each force is found from an equation the other unknowns drop out of: <b>moments about the point where their lines meet</b>. Forces in <b>${fu}</b>, lengths in <b>${U.lu}</b>.</p>` + slackTrussNote(slack);
   if (!R.joints) return h + `<ul class="jt-problems">${R.problems.map(p => `<li>${esc(p)}</li>`).join('')}</ul>`;
   // a truss statics can't solve: say why, as the method of joints does
   if (!R.empty && R.status && R.status !== 'determinate') return h + `<ul class="jt-problems">${R.problems.map(p => `<li>${esc(p)}</li>`).join('')}</ul>`;
@@ -15448,7 +15730,7 @@ $('#steps-body').addEventListener('click', e => {
   if (b.dataset.sec === 'clear') st.section = { cut: [], line: null, keepJoint: null };
   if (b.dataset.sec === 'flip') {
     // keep the side the free body isn't on now
-    const sm = solverModel(st.model);
+    const { sm } = handTruss(st.model);
     const R = TrussJoints.analyzeSection(sm, nodeLoadsOf(st.model), factorsFor(st.activeCase), st.section.cut, { memberLoadLocal: FrameSolver.memberLoadLocal, keepJoint: st.section.keepJoint });
     if (R.parts && R.keep != null) st.section.keepJoint = R.parts[1 - R.keep][0];
   }
@@ -15489,6 +15771,8 @@ window.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#steps')
 function beamChain(ids) {
   const mbs = [...ids].map(memberById).filter(Boolean);
   if (!mbs.length) return { error: 'Select a member, or several members end to end in a straight line, then open the beam solver.' };
+  const cab = mbs.find(mb => mb.tensionOnly);
+  if (cab) return { error: `Member ${cab.id} is a cable (tension only), which carries no bending: the beam solver is for beams.` };
   const deg = new Map();
   for (const mb of mbs) for (const n of [mb.i, mb.j]) deg.set(n, (deg.get(n) || 0) + 1);
   if ([...deg.values()].some(d => d > 2)) return { error: 'The selected members branch at a node. Select members that form one straight line.' };
@@ -16895,7 +17179,7 @@ function reportHTML() {
   const date = new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
   const o = reportOpts(), on = k => o.parts[k] !== false, runOn = key => !o.skip.includes(String(key));
   let h = `<h1>${esc(m.title || 'TrussFrame model')}</h1>
-  <p class="meta">TrussFrame · 2D frame analysis report · ${esc(date)}<br>Units: ${unitSummary(', ')} · First-order linear-elastic analysis (direct stiffness method), ${deformSummary() || 'Euler-Bernoulli members with axial deformation'}</p>`;
+  <p class="meta">TrussFrame · 2D frame analysis report · ${esc(date)}<br>Units: ${unitSummary(', ')} · First-order linear-elastic analysis (direct stiffness method), ${deformSummary() || 'Euler-Bernoulli members with axial deformation'}${hasCables() ? '; cables (tension only) by repeated analysis, each load case and combination on its own, until every cable is taut or slack' : ''}</p>`;
   if (['drawing', 'nodes', 'members', 'materials', 'sections', 'combos'].some(on)) h += '<h2>Model</h2>';
   // drawings in the Model view style, or with the Custom view's layers (falls back to Model when a case cannot be analysed)
   const useCustom = o.drawStyle === 'custom', layerNames = () => LAYERS.filter(([k]) => customLayers()[k]).map(([, l]) => l).join(', ') || 'nothing ticked';
@@ -16910,7 +17194,7 @@ function reportHTML() {
     `<tr><td>${nd.id}</td><td>${Lx(nd.x)}</td><td>${Lx(nd.y)}</td><td class="l">${supTxt(nd.support)}${nd.angle ? ` at ${nd.angle}°` : ''}</td></tr>`).join('')}</table>`;
   const name = (list, id) => esc((list.find(x => x.id === id) || {}).name || '—');
   if (on('members')) h += `<h3>Members</h3><table><tr><th>Member</th><th>Node i</th><th>Node j</th><th>L [${uL}]</th><th class="l">Material</th><th class="l">Section</th><th class="l">Hinges</th></tr>${m.members.map(mb =>
-    `<tr><td>${mb.id}</td><td>${mb.i}</td><td>${mb.j}</td><td>${Lx(memberFrame(mb).L)}</td><td class="l">${name(m.materials, mb.material)}</td><td class="l">${name(m.sections, mb.section)}</td><td class="l">${[mb.hingeI ? 'start' : '', mb.hingeJ ? 'end' : ''].filter(Boolean).join(', ') || '—'}</td></tr>`).join('')}</table>`;
+    `<tr><td>${mb.id}</td><td>${mb.i}</td><td>${mb.j}</td><td>${Lx(memberFrame(mb).L)}</td><td class="l">${name(m.materials, mb.material)}</td><td class="l">${name(m.sections, mb.section)}</td><td class="l">${mb.tensionOnly ? 'cable: pinned, tension only' : [mb.hingeI ? 'start' : '', mb.hingeJ ? 'end' : ''].filter(Boolean).join(', ') || '—'}</td></tr>`).join('')}</table>`;
   if (on('materials')) h += `<h3>Materials</h3><table><tr><th>Name</th><th>E [${unit('stress')}]</th><th>ν</th><th>γ [${unit('weight')}]</th><th>α [${unit('alpha')}]</th></tr>${m.materials.map(x =>
     `<tr><td>${esc(x.name)}</td><td>${fsig(toU('stress', x.E))}</td><td>${x.nu ?? ''}</td><td>${fsig(toU('weight', x.gamma || 0))}</td><td>${toU('alpha', x.alpha || 0).toExponential(3)}</td></tr>`).join('')}</table>`;
   if (on('sections')) h += `<h3>Sections</h3><table><tr><th>Name</th><th class="l">Shape</th><th class="l">Dimensions [${unit('dim')}]</th><th>A [${unit('area')}]</th><th>I [${unit('inertia')}]</th></tr>${m.sections.map(x => {
@@ -16943,6 +17227,8 @@ function reportHTML() {
     if (on('V')) h += maxOf('V') > 1e-9 ? fig('V', `Shear force V [${uF}]`) : '<p class="meta">V = 0 everywhere.</p>';
     if (on('N')) h += maxOf('N') > 1e-9 ? fig('N', `Axial force N [${uF}], tension positive`) : '<p class="meta">N = 0 everywhere.</p>';
     h += `</div>`;
+    if (R.slack && R.slack.length) h += `<p>Slack: ${R.slack.length === 1 ? `member ${R.slack[0]}, a cable` : `members ${R.slack.join(', ')}, cables`} these loads would push, so ${R.slack.length === 1 ? 'it carries' : 'they carry'} nothing (drawn dashed).</p>`;
+    else if (hasCables()) h += '<p>Every cable is taut.</p>';
     const sum = R.reactions.reduce((a, r) => [a[0] + r.rx, a[1] + r.ry], [0, 0]);
     if (on('reactions')) h += `<h3>Support reactions</h3><table><tr><th>Node</th><th>Rx [${uF}]</th><th>Ry [${uF}]</th><th>M [${uM}]</th></tr>${R.reactions.map(r =>
       `<tr><td>${r.id}</td><td>${F(r.rx)}</td><td>${F(r.ry)}</td><td>${M(r.mz)}</td></tr>`).join('')}<tr><td>Sum</td><td>${F(sum[0])}</td><td>${F(sum[1])}</td><td></td></tr></table>`;
