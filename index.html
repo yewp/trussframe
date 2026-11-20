@@ -11028,7 +11028,10 @@ function drawLoads(g, C) {
       return out;
     }
     if (labelOff(Math.hypot(B[0] - A[0], B[1] - A[1]))) return out;
-    if (Math.hypot(run.lo.v[0] - run.hi.v[0], run.lo.v[1] - run.hi.v[1]) <= 1e-9 * run.qmax) { // the same load all along
+    // the same load all along: every piece, at both its ends, as at the run's first end (equal ends alone are not
+    // enough: up 20 at one end and the other, down 20 between them, has its ends and its turns labelled)
+    const asLo = v => Math.hypot(v[0] - run.lo.v[0], v[1] - run.lo.v[1]) <= 1e-9 * run.qmax;
+    if (run.pieces.every(p => asLo(p.v[0]) && asLo(p.v[1]))) {
       if (run.host === pc) over(A, B, run.lo.v, run.hi.v, lenOf(run, run.qmax) + 12, endText(run.lo.pc, run.lo.e));
       return out;
     }
