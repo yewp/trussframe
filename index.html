@@ -770,6 +770,9 @@ html, body { margin: 0; }
 }
 /* the Delete button of a touch screen (Delete tool), in Done's place */
 .touch-del { min-height: 48px; padding: 0 22px; border-color: var(--danger); color: var(--danger); touch-action: none; -webkit-user-select: none; user-select: none; }
+/* Edit, on a touch screen with something selected: opens Properties at it (beside Done or Delete when shown) */
+.touch-edit { min-height: 44px; padding: 0 20px; }
+.touch-del.on { background: var(--danger); border-color: var(--danger); color: #fff; box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3); }
 
 </style>
 </head>
@@ -910,7 +913,8 @@ html, body { margin: 0; }
         <button class="btn icon" id="btn-redo" title="Redo (Ctrl+Y)" aria-label="Redo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg></button>
       </div>
       <button class="btn touch-esc" id="touch-esc" title="End what is being drawn or the command under way (as Esc does)" hidden>Done</button>
-      <button class="btn touch-esc touch-del" id="touch-del" title="Delete what the cross-hair is on (one finger aims, another taps here), or what was selected" hidden>Delete</button>
+      <button class="btn touch-esc touch-del" id="touch-del" title="Delete what the cross-hair is on (one finger aims, another taps here), or what was selected; tapped on its own, it stays pressed and the next drag deletes a box" aria-pressed="false" hidden>Delete</button>
+      <button class="btn touch-esc touch-edit" id="touch-edit" title="Open what is selected in Properties, to edit it" hidden>Edit</button>
     </div>
 
     <aside>
@@ -7926,6 +7930,18 @@ function renderTouchUi() {
     d.hidden = !(touchSeen && !st.print && st.tool === 'delete');
     if (touchBoxDel && !(st.drag && st.drag.del)) touchBoxDel = false; // the box was dropped (two fingers, another tool)
     if (d.hidden) touchBoxArmed = false;
+    const on = touchBoxArmed && !touchDelAt; // tapped: it stays pressed until the next drag draws its box
+    d.classList.toggle('on', on); d.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+  // Edit: with Select or Box select and something selected (a node, a member, a dimension line, or a load tapped on
+  // the drawing), opens Properties at it. Not with the tools that place things: they select what they have just
+  // placed, and the button would show after every member drawn. Beside Done when that shows.
+  const ed = document.getElementById('touch-edit');
+  if (ed) {
+    const any = st.sel.nodes.size || st.sel.members.size || st.sel.dims.size;
+    ed.hidden = !(touchSeen && !st.print && any && (st.tool === 'select' || st.tool === 'box') && !st.xcmd && !st.paste && !st.gridPick);
+    const left = [b, d].find(x => x && !x.hidden);
+    ed.style.left = !ed.hidden && left ? left.offsetLeft + left.offsetWidth + 8 + 'px' : '';
   }
 }
 // Done pressed while a finger still aims (the next member's end, say): what it was about to place is dropped, not
@@ -7940,6 +7956,23 @@ function touchDone() {
 const touchEscBtn = document.getElementById('touch-esc');
 touchEscBtn.addEventListener('pointerdown', e => { e.preventDefault(); touchEscAt = Date.now(); touchDone(); });
 touchEscBtn.addEventListener('click', () => { if (Date.now() - touchEscAt > 700) touchDone(); }); // (the keyboard's Enter on it)
+// Edit pressed: Properties opens (a folded phone panel pops up at its usual size) at what is selected: the load's
+// box, highlighted, when a load was tapped; the Support box, highlighted, for nodes (only) with a support; otherwise
+// the top, where the member's, node's or line's own fields are
+const touchEditSupport = () => !st.focusLoad && st.sel.nodes.size > 0 && !st.sel.members.size && !st.sel.dims.size
+  && [...st.sel.nodes].map(nodeById).some(n => n && n.support && ['x', 'y', 'r'].some(k => n.support[k] && n.support[k] !== 'free'));
+function touchEdit() {
+  const app = document.querySelector('.app'), sup = touchEditSupport();
+  if (onPhone() && !app.classList.contains('sheet')) { app.style.removeProperty('--sheet-h'); app.style.removeProperty('--side-w'); app.classList.add('sheet'); }
+  st.tab = 'props'; renderTabs();
+  if (st.focusLoad) st.focusScroll = true;
+  renderPanel();
+  const box = sup && panel.querySelector('[data-box="support"]');
+  if (box) { box.classList.add('focus'); box.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+  else if (!st.focusLoad) panel.scrollTop = 0;
+  render();
+}
+document.getElementById('touch-edit').addEventListener('click', touchEdit);
 
 // Box select with a finger: once the finger drags (its cross-hair appears above it), a box runs from that first
 // point of the cross-hair to where it is now, as a mouse drags one; the lift selects what it takes (left to right:
@@ -7999,7 +8032,10 @@ function touchDeleteNow() {
 // left: what it touches, as box select), and what it would delete shows red. Letting go of the button (or lifting
 // the aiming finger) deletes it; if the box never grew, that was a tap, and what the cross-hair was on goes instead.
 // While the button stays held, each new drag draws another box.
-let touchBoxDel = false, touchBoxArmed = false, touchDelFrom = null;
+// Tapped instead (pressed and let go with no box drawn), it stays pressed: the next drag on the drawing draws the
+// box, and its lift deletes what is in it, after which the button pops up again. A tap on it while pressed pops it
+// up with nothing deleted. (A quick tap on the drawing meanwhile still deletes what it lands on.)
+let touchBoxDel = false, touchBoxArmed = false, touchDelFrom = null, touchDelBoxed = false;
 function touchBoxDelStart(armed) {
   if (st.tool !== 'delete') return;
   if (!armed && !(touchAim && touchLift && touchDelFrom)) { touchBoxArmed = true; touchBuzz(25); return; } // no finger aiming yet: wait for one
@@ -8008,7 +8044,7 @@ function touchBoxDelStart(armed) {
   const [x, y] = st.mouse, [px, py] = touchDelFrom;
   st.drag = { kind: 'box', px, py, x2: x, y2: y, moved: Math.hypot(x - px, y - py) >= 4, del: true, tap: armed ? null : st.hoverDel };
   if (st.drag.moved) st.drag.sets = boxDeletes(st.drag);
-  touchBoxDel = true; st.hoverDel = null; st.hoverLoad = null; touchDelWas = null;
+  touchBoxDel = true; touchDelBoxed = true; st.hoverDel = null; st.hoverLoad = null; touchDelWas = null;
   if (!armed) touchBuzz(25);
   render();
 }
@@ -8042,8 +8078,9 @@ function touchDeleteSelection() {
 }
 touchDelBtn.addEventListener('pointerdown', e => {
   e.preventDefault();
+  if (touchBoxArmed && !touchDelAt && !touchBoxDel) { touchBoxArmed = false; touchDelAt = 0; render(); return; } // pressed (tapped before): pops up
   if (!(touchAim && touchLift) && touchDeleteSelection()) { touchDelAt = 0; return; } // (its release then does nothing)
-  touchDelAt = Date.now();
+  touchDelAt = Date.now(); touchDelBoxed = false;
   try { touchDelBtn.setPointerCapture(e.pointerId); } catch (err) { /* not a live pointer */ }
   touchDelFrom = touchAim && touchLift && st.mouse ? [...st.mouse] : null; // where the box starts
   touchBoxDelStart(false);
@@ -8052,7 +8089,9 @@ touchDelBtn.addEventListener('pointerup', () => {
   if (!touchDelAt) return;
   touchDelAt = 0;
   if (touchBoxDel) touchBoxDelEnd(); // let go of: the box's contents go (or, not grown, what the cross-hair was on)
-  else touchBoxArmed = false; // pressed, but no box was drawn
+  else if (touchDelBoxed) touchBoxArmed = false; // held for boxes drawn meanwhile: done
+  else { touchBoxArmed = true; flash('Delete is on: drag on the drawing to draw a box, and what is in it is deleted when you lift. Tap Delete again to cancel.'); }
+  render();
 });
 touchDelBtn.addEventListener('pointercancel', () => { touchDelAt = 0; touchBoxArmed = false; if (touchBoxDel) { touchBoxDel = false; if (st.drag && st.drag.del) st.drag = null; render(); } });
 
@@ -12672,7 +12711,7 @@ function panelProps() {
     <div class="fields">
       ${multi ? '' : `<label for="n-x">x</label>${num('n-x', uv('len', n.x))}<span class="unit">${unit('len')}</span><label for="n-y">y</label>${num('n-y', uv('len', n.y))}<span class="unit">${unit('len')}</span>`}
     </div>
-    <div class="box"><h3>Support</h3>
+    <div class="box" data-box="support"><h3>Support</h3>
       <div class="fields">
         <label for="s-x">Horizontal</label><select id="s-x">${kinds('x')}</select><span></span>
         <label for="s-y">Vertical</label><select id="s-y">${kinds('y')}</select><span></span>
