@@ -1892,8 +1892,8 @@ if (IS_NODE && require.main === module) {
 
   // ---------- tension-only members (cables) ----------
   // A member with tensionOnly set (a cable, or a rod brace) pulls but cannot push. It is a straight bar pinned at
-  // both ends (whatever its hinge settings say), with axial deformation (whatever the model's setting), and no sag
-  // or pretension: a first-order model, as building programs use for rod bracing. It takes no load along its
+  // both ends (whatever its hinge settings say), with axial deformation (whatever the model's setting), and no sag:
+  // a first-order model, as building programs use for rod bracing; it can be pretensioned (pretensionOf, below). It takes no load along its
   // length: its own weight goes half to each end node, and any other load on it is refused, since a cable loaded
   // across its length would sag, which a straight bar cannot show.
   // What a cable carries depends on the loads, so results no longer add up: each load case or combination is
@@ -1919,7 +1919,8 @@ if (IS_NODE && require.main === module) {
   // opts.trace: also return the intermediate matrices (for the step-by-step view)
   // opts.caseNames: { caseId: name }, for the message about a load on a cable
   // cab (from analyze, for models with cables): { slack: Set of the member ids of slack cables, k: the axial
-  // stiffness EA/L a slack cable keeps (0: none), check: whether to run the accuracy check at the end }
+  // stiffness EA/L a slack cable keeps (0: none), check: whether to run the accuracy check at the end, pre: Map of
+  // member id -> how much shorter (m) a pretensioned cable is than the distance between its nodes (pretensionOf) }
   function analyzeOnce(model, loads, factors, opts, cab) {
     const nodes = model.nodes, nn = nodes.length;
     if (!nn) throw new Error('The model has no nodes.');
@@ -2002,12 +2003,15 @@ if (IS_NODE && require.main === module) {
       }
       const { p1, p2 } = ld, [q1, q2] = Phi > 0 ? [0, 0] : [ld.q1, ld.q2]; // with shear, extraFixedEnd takes q
       const Tc = (ld.tTop + ld.tBot) / 2, kth = -alpha * (ld.tTop - ld.tBot) / h;
+      // a pretensioned cable, e shorter than its nodes are apart: held at their distance it pulls E·A·e/L (a slack
+      // one pulls nothing; what it would carry, cableState works out from e)
+      const pre = cable && cab && cab.pre ? cab.pre.get(mb.id) || 0 : 0, Npre = slack ? 0 : E * A * pre / L;
       const Rx = extraFixedEnd(ld, L, Phi);
       const R = [
-        -(2 * p1 + p2) * L / 6 + E * A * alpha * Tc,
+        -(2 * p1 + p2) * L / 6 + E * A * alpha * Tc - Npre,
         -(7 * q1 + 3 * q2) * L / 20,
         -(3 * q1 + 2 * q2) * L * L / 60 + E * I * kth,
-        -(p1 + 2 * p2) * L / 6 - E * A * alpha * Tc,
+        -(p1 + 2 * p2) * L / 6 - E * A * alpha * Tc + Npre,
         -(3 * q1 + 7 * q2) * L / 20,
         (2 * q1 + 3 * q2) * L * L / 60 - E * I * kth,
       ].map((v, i) => v + Rx[i]);
@@ -2042,7 +2046,7 @@ if (IS_NODE && require.main === module) {
         P[dofs[i]] -= fi;
         Pfe[dofs[i]] += fi;
       }
-      elems.push({ mb, a, b, L, c, s, E, A, I, A0, I0, rigid, axialOn, shearOn, h, As, G, Phi, alpha, k0, R0: R, rel, k, R: Rs, kth, Tc, ld, dofs, kg, cable, slack });
+      elems.push({ mb, a, b, L, c, s, E, A, I, A0, I0, rigid, axialOn, shearOn, h, As, G, Phi, alpha, k0, R0: R, rel, k, R: Rs, kth, Tc, ld, dofs, kg, cable, slack, pre, Npre });
     }
 
     // nodal loads and prescribed displacements
@@ -2223,7 +2227,7 @@ if (IS_NODE && require.main === module) {
       const fg = [c * f[0] - s * f[1], s * f[0] + c * f[1], f[2], c * f[3] - s * f[4], s * f[3] + c * f[4], f[5]];
       for (let i = 0; i < 3; i++) { reactions[el.a][i] += fg[i]; reactions[el.b][i] += fg[3 + i]; }
       const mr = { id: el.mb.id, i: el.mb.i, j: el.mb.j, L: el.L, c, s, f, dl, EI: el.E * el.I, EA: el.E * el.A, GAs: el.Phi > 0 ? el.G * el.As : Infinity, kth: el.kth, Tc: el.Tc, alpha: el.alpha, ld: el.ld };
-      if (el.cable) { mr.cable = true; mr.kc = el.E * el.A0 / el.L; } // a cable, and its axial stiffness EA/L when taut
+      if (el.cable) { mr.cable = true; mr.kc = el.E * el.A0 / el.L; if (el.pre) mr.pre = el.pre; } // a cable, its axial stiffness EA/L when taut, and its shortening
       return mr;
     });
     nodes.forEach((n, i) => { for (let d = 0; d < 3; d++) reactions[i][d] -= Pnodal[i * 3 + d]; });
@@ -2270,29 +2274,110 @@ if (IS_NODE && require.main === module) {
   // stiffnesses ε: the stretch of a slack cable is δ = δ0 + m/ε, a part that grows without bound as ε goes to zero
   // (the structure swinging in the direction nothing else holds) and a part that does not. kRef·m is the force the
   // cable takes in the limit: positive, the swing would pull it taut; negative, the loads need it to push (pushers);
-  // zero, nothing pushes that way, and the finite part δ0 decides.
-  function cableState(model, loads, factors, opts, slack, kRef) {
+  // zero, nothing pushes that way, and the finite part δ0 decides. A pretensioned cable (pre: its shortening e) is
+  // taut once its ends are less than e closer together: it would carry EA/L·(δ + e).
+  function cableState(model, loads, factors, opts, slack, kRef, pre = null) {
     const T = new Map(), pushers = [];
     // the scale of the forces: 1e-9 of the largest end force of a working member (and a floor of 1e-12 kN)
     const tolOf = r => { let F = 0; for (const mr of r.members) if (!slack.has(mr.id)) for (const d of [0, 1, 3, 4]) F = Math.max(F, Math.abs(mr.f[d])); return 1e-9 * F + 1e-12; };
     let r = null;
-    try { r = analyzeOnce(model, loads, factors, opts, { slack, k: 0, check: false }); } catch (e) { if (!e.mechanism || !slack.size) throw e; }
+    try { r = analyzeOnce(model, loads, factors, opts, { slack, k: 0, check: false, pre }); } catch (e) { if (!e.mechanism || !slack.size) throw e; }
     if (r) {
-      for (const mr of r.members) if (mr.cable) T.set(mr.id, slack.has(mr.id) ? mr.kc * (mr.dl[3] - mr.dl[0]) : mr.f[3]);
+      for (const mr of r.members) if (mr.cable) T.set(mr.id, slack.has(mr.id) ? mr.kc * (mr.dl[3] - mr.dl[0] + (mr.pre || 0)) : mr.f[3]);
       return { T, tol: tolOf(r), stable: true, pushers, kRef: r.kRef };
     }
     const [e1, e2] = SLACK_K;
-    const r1 = analyzeOnce(model, loads, factors, opts, { slack, k: e1 * kRef, check: false });
-    const r2 = analyzeOnce(model, loads, factors, opts, { slack, k: e2 * kRef, check: false });
+    const r1 = analyzeOnce(model, loads, factors, opts, { slack, k: e1 * kRef, check: false, pre });
+    const r2 = analyzeOnce(model, loads, factors, opts, { slack, k: e2 * kRef, check: false, pre });
     const tol = tolOf(r2);
     r2.members.forEach((mr, n) => {
       if (!mr.cable) return;
       if (!slack.has(mr.id)) { T.set(mr.id, mr.f[3]); return; }
       const m1 = r1.members[n], d1 = m1.dl[3] - m1.dl[0], d2 = mr.dl[3] - mr.dl[0];
       const m = (d2 - d1) * e1 * e2 / (e1 - e2), B = kRef * m;
-      if (Math.abs(B) > tol) { T.set(mr.id, B); if (B < 0) pushers.push({ id: mr.id, B }); } else T.set(mr.id, mr.kc * (d1 - m / e1));
+      if (Math.abs(B) > tol) { T.set(mr.id, B); if (B < 0) pushers.push({ id: mr.id, B }); } else T.set(mr.id, mr.kc * (d1 - m / e1 + (mr.pre || 0)));
     });
     return { T, tol, stable: false, pushers, kRef };
+  }
+
+  // ---------- pretension ----------
+  // A cable with pretension T0 (mb.pretension, kN, on a tensionOnly member) is tightened to T0 before any load: with
+  // no load on the structure it carries T0, as a turnbuckle and a gauge would set it. It is modelled as a cable
+  // shorter than the distance between its nodes by e (a lack of fit), the shortening that gives T0 once the
+  // structure has given way to the pull (the frame squeezes, so e is more than T0·L/EA). Every analysis has that
+  // shortening in it (not the influence lines, whose loads are added up: there the cables are ordinary bars).
+  // Several pretensioned cables are solved together: F, the force each one carries from a 1 m shortening of each
+  // (symmetric), and F e = T0. Cables tightened together (an X brace on a pinned frame, where tightening one
+  // tightens the other just as much) cannot take any pretensions at all: then the nearest the structure allows is
+  // used (least squares), and the result names them (short). So does a cable that nothing resists (the frame just
+  // moves when it is shortened): it gets none. The other cables, taut or slack under the pretension, are found as
+  // in analyze. Worked out once per structure (the loads do not come into it).
+  const PRE_MEMO = []; // [[key, result]], the last few structures
+  function pretensionOf(model, opts) {
+    const pc = model.members.filter(mb => mb.tensionOnly && mb.pretension > 0);
+    if (!pc.length) return null;
+    const key = JSON.stringify([model.nodes, model.members, model.materials, model.sections, !!opts.shear, !!opts.axialRigid]);
+    const hit = PRE_MEMO.find(x => x[0] === key);
+    if (hit) return hit[1];
+    const none = { node: () => null, member: () => null }, q = { shear: opts.shear, axialRigid: opts.axialRigid };
+    const ids = pc.map(mb => mb.id), T0 = pc.map(mb => mb.pretension), n = ids.length;
+    const others = model.members.filter(mb => mb.tensionOnly && !(mb.pretension > 0)).map(mb => mb.id);
+    let kRef = 0;
+    // one analysis with no load and these shortenings (a Map), the cables in `slack` slack (keeping a tiny stiffness
+    // if the structure does not stand without them)
+    const once = (slack, pre) => {
+      try { const r = analyzeOnce(model, none, [], q, { slack, k: 0, check: false, pre }); if (!kRef) kRef = r.kRef; return r; } catch (e) {
+        if (!e.mechanism || !slack.size) throw e;
+        return analyzeOnce(model, none, [], q, { slack, k: SLACK_K[1] * kRef, check: false, pre });
+      }
+    };
+    const N = (r, id) => r.members.find(mr => mr.id === id);
+    let slack = new Set(), e = new Map(), r0 = null;
+    for (let round = 0; ; round++) {
+      const F = ids.map(() => new Array(n).fill(0));
+      let kc = 0; // the stiffest of these cables' own EA/L
+      ids.forEach((j, cj) => { const r = once(slack, new Map([[j, 1]])); ids.forEach((i, ci) => { const mr = N(r, i); F[ci][cj] = mr.f[3]; kc = Math.max(kc, mr.kc); }); });
+      // (an eigenvalue under 1e-8 of that is nothing: no pretension that way)
+      const x = symLeastSquares(F, T0, 1e-8 * kc);
+      e = new Map(ids.map((id, k) => [id, x[k]]));
+      r0 = once(slack, e);
+      // the other cables under the pretension alone: pushed, slack; pulled (or reached again), taut
+      const tol = 1e-9 * Math.max(...T0) + 1e-12, next = new Set();
+      for (const id of others) { const mr = N(r0, id), t = slack.has(id) ? mr.kc * (mr.dl[3] - mr.dl[0]) : mr.f[3]; if (slack.has(id) ? t <= tol : t < -tol) next.add(id); }
+      if ((next.size === slack.size && [...next].every(id => slack.has(id))) || round >= others.length + 5) break;
+      slack = next;
+    }
+    const got = ids.map(id => N(r0, id).f[3]), big = Math.max(...T0);
+    const res = { e, ids, asked: T0, got, short: ids.filter((id, k) => Math.abs(got[k] - T0[k]) > 1e-6 * big + 1e-9) };
+    PRE_MEMO.unshift([key, res]);
+    if (PRE_MEMO.length > 4) PRE_MEMO.pop();
+    return res;
+  }
+  // The solution of F x = b (F symmetric, positive semi-definite) by least squares, the smallest one where there are
+  // many: by F's eigenvectors (cyclic Jacobi), leaving out the directions whose eigenvalue is not over `floor`.
+  function symLeastSquares(F, b, floor) {
+    const n = b.length, A = F.map((row, i) => row.map((v, j) => (v + F[j][i]) / 2)), V = A.map((row, i) => row.map((_, j) => (i === j ? 1 : 0)));
+    for (let sweep = 0; sweep < 100; sweep++) {
+      let off = 0, all = 0;
+      for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) { all += A[i][j] ** 2; if (i !== j) off += A[i][j] ** 2; }
+      if (off <= 1e-30 * all) break;
+      for (let p = 0; p < n - 1; p++) for (let r = p + 1; r < n; r++) {
+        if (A[p][r] === 0) continue;
+        const th = (A[r][r] - A[p][p]) / (2 * A[p][r]), t = (th >= 0 ? 1 : -1) / (Math.abs(th) + Math.sqrt(th * th + 1)), c = 1 / Math.sqrt(t * t + 1), s = t * c;
+        for (let k = 0; k < n; k++) { const ap = A[k][p], ar = A[k][r]; A[k][p] = c * ap - s * ar; A[k][r] = s * ap + c * ar; }
+        for (let k = 0; k < n; k++) { const ap = A[p][k], ar = A[r][k]; A[p][k] = c * ap - s * ar; A[r][k] = s * ap + c * ar; }
+        for (let k = 0; k < n; k++) { const vp = V[k][p], vr = V[k][r]; V[k][p] = c * vp - s * vr; V[k][r] = s * vp + c * vr; }
+      }
+    }
+    const x = new Array(n).fill(0);
+    for (let k = 0; k < n; k++) {
+      const lam = A[k][k];
+      if (!(lam > floor)) continue;
+      let d = 0;
+      for (let i = 0; i < n; i++) d += V[i][k] * b[i];
+      for (let i = 0; i < n; i++) x[i] += V[i][k] * d / lam;
+    }
+    return x;
   }
   // The analysis. With cables (members with tensionOnly), it is repeated: every cable starts taut; a taut one in
   // compression goes slack, and a slack one whose ends would move apart (it would be in tension) is taut again;
@@ -2301,8 +2386,10 @@ if (IS_NODE && require.main === module) {
   // at a time, the cable furthest out first; if that does not settle either, it is an error (as it is when the loads
   // would need a cable to push).
   // opts.cablesLinear, or opts.cache (the same structure under many loads, whose results are added together, as for
-  // an influence line): the cables are taken as ordinary pinned bars, all working (r.cablesLinear).
-  // The results carry slack: the ids of the slack cables ([] with none), and cableRounds: how many rounds it took.
+  // an influence line): the cables are taken as ordinary pinned bars, all working, without pretension (r.cablesLinear).
+  // The results carry slack: the ids of the slack cables ([] with none), cableRounds: how many rounds it took, and
+  // pretension (with pretensioned cables): { ids, asked, got (kN, with no load), short (the ids that could not get
+  // theirs), e (Map: id -> shortening, m) }.
   function analyze(model, loads, factors, opts = {}) {
     const cables = model.members.filter(mb => mb.tensionOnly).map(mb => mb.id);
     if (!cables.length || opts.cablesLinear || opts.cache) {
@@ -2311,11 +2398,12 @@ if (IS_NODE && require.main === module) {
       if (cables.length) r.cablesLinear = true;
       return r;
     }
+    const pt = pretensionOf(model, opts), pre = pt ? pt.e : null;
     const quiet = { ...opts, trace: false }, slack = new Set(), seen = new Set(['']), most = 3 * cables.length + 30;
     const list = ids => (ids.length === 1 ? `member ${ids[0]}` : `members ${ids.slice(0, -1).join(', ')} and ${ids[ids.length - 1]}`);
     let single = false, rounds = 0, kRef = 0, state;
     for (;;) {
-      state = cableState(model, loads, factors, quiet, slack, kRef);
+      state = cableState(model, loads, factors, quiet, slack, kRef, pre);
       rounds++;
       if (!kRef) kRef = state.kRef;
       const flips = [];
@@ -2342,10 +2430,11 @@ if (IS_NODE && require.main === module) {
       err.members = ids;
       throw err;
     }
-    const r = analyzeOnce(model, loads, factors, opts, { slack, k: state.stable ? 0 : SLACK_K[1] * kRef, check: true });
+    const r = analyzeOnce(model, loads, factors, opts, { slack, k: state.stable ? 0 : SLACK_K[1] * kRef, check: true, pre });
     for (const mr of r.members) if (slack.has(mr.id)) mr.f = [0, 0, 0, 0, 0, 0];
     r.slack = [...slack].sort((p, q) => p - q);
     r.cableRounds = rounds;
+    if (pt) r.pretension = pt;
     return r;
   }
 
@@ -2427,7 +2516,7 @@ if (IS_NODE && require.main === module) {
     return [...out];
   }
 
-  const api = { analyze, memberStations, sectionProps, sectionParts, partsProps, loadBreaks, memberLoadLocal, cableLoadKind };
+  const api = { analyze, pretension: pretensionOf, memberStations, sectionProps, sectionParts, partsProps, loadBreaks, memberLoadLocal, cableLoadKind };
   // this file's own text, so the app can start a copy of the solver in a background worker without loading a
   // file (which a page opened from disk may not do)
   api.source = '(' + frameSolverFactory.toString() + ')';
@@ -2974,6 +3063,7 @@ if (IS_NODE && require.main === module) {
 //   AISC 360-22 checks of steel I-shape members bent about their strong axis: tension yielding (D2), compression
 //   (E3, with E7 effective widths for slender elements), flexure (F2 yielding and lateral-torsional buckling, F3
 //   flange local buckling), shear (G2.1) and combined force and bending (H1.1), LRFD or ASD.
+//   AISC 360-22 checks of steel rods in tension (cables with a round solid section): yielding (D2) and the threads (J3).
 // Units: section dimensions in mm, E and Fy in MPa, lengths in m, forces in kN and moments in kN·m.
 (function (root) {
   // ---------- ASCE 7-22 load combinations ----------
@@ -3171,6 +3261,41 @@ if (IS_NODE && require.main === module) {
       slenderKL: !design.tensionOnly && comp.Lc_r > 200 }; // (a cable is never in compression)
   }
 
+  // ---------- steel rods in tension (a cable with a round solid section) ----------
+  // AISC 360-22: yielding of the gross section, D2(a): Pn = Fy Ag, φt = 0.90 (Ωt = 1.67); and for a threaded rod,
+  // rupture of the threads, J3 (Table J3.2, threaded parts): Rn = Fnt Ab with Fnt = 0.75 Fu and Ab the nominal area
+  // of the unthreaded body, φ = 0.75 (Ω = 2.00). Upset ends put the threads on a larger diameter, sized to be stronger
+  // than the body, and a rod without threads (welded ends) has none: yielding alone then. No slenderness limit (D1's
+  // L/r ≤ 300 is not for rods in tension), and no compression: a cable never pushes.
+  // The grades: Fy and Fu, MPa (ASTM in ksi; the EN steels from EN 1993-1-1 Table 3.1, t ≤ 40 mm).
+  const KSI = 6.894757293;
+  const ROD_GRADES = Object.fromEntries([
+    ['A36', 36, 58], ['A572 Gr 50', 50, 65], ['F1554 Gr 36', 36, 58], ['F1554 Gr 55', 55, 75], ['F1554 Gr 105', 105, 125], ['A193 B7', 105, 125],
+  ].map(([k, fy, fu]) => [k, { Fy: fy * KSI, Fu: fu * KSI }]).concat([['S235', 235, 360], ['S275', 275, 430], ['S355', 355, 510]].map(([k, fy, fu]) => [k, { Fy: fy, Fu: fu }])));
+  // the grade a material's name points to (null: none of them)
+  function rodGradeOf(name) {
+    const s = String(name || '');
+    if (/F\s?1554/i.test(s)) return /105/.test(s) ? 'F1554 Gr 105' : /\b55\b/.test(s) ? 'F1554 Gr 55' : 'F1554 Gr 36';
+    if (/A\s?193|\bB7\b/i.test(s)) return 'A193 B7';
+    if (/A\s?572|A\s?992|Gr\.?\s*50\b/i.test(s)) return 'A572 Gr 50'; // (A992 is for shapes; a rod with its Fy and Fu)
+    if (/A\s?36\b/i.test(s)) return 'A36';
+    const en = /\bS\s?(235|275|355)\b/i.exec(s);
+    return en ? 'S' + en[1] : null;
+  }
+  // sec: { d } mm; grade: { Fy, Fu } MPa; stations: [{ x (m), N (kN, tension +) }]; design: { method, ends: 'upset'
+  // for upset ends or no threads (blank: threaded) }. Strengths in kN; ratio: the largest tension over the strength.
+  function checkRodMember(sec, grade, stations, design = {}) {
+    const asd = design.method === 'asd', Ag = Math.PI * sec.d * sec.d / 4, threaded = design.ends !== 'upset';
+    const f = (phi, omega) => (asd ? 1 / omega : phi); // design strength = f × nominal
+    const yieldN = grade.Fy * Ag / 1e3, yieldC = f(0.9, 1.67) * yieldN;
+    const Fnt = 0.75 * grade.Fu, threadN = Fnt * Ag / 1e3, threadC = f(0.75, 2.0) * threadN;
+    const byThreads = threaded && threadC < yieldC, cap = byThreads ? threadC : yieldC;
+    let worst = { N: 0, x: 0 };
+    for (const s of stations) if (s.N > worst.N) worst = { N: s.N, x: s.x };
+    return { rod: true, method: asd ? 'asd' : 'lrfd', d: sec.d, Ag, Fy: grade.Fy, Fu: grade.Fu, threaded, yieldN, yieldC, Fnt, threadN, threadC,
+      cap, worst, ratio: worst.N / cap, governs: byThreads ? 'threads' : 'yielding' };
+  }
+
   // ---------- NDS 2018 wood members (rectangular sections) ----------
   // Reference design values (psi) of the wood grades the Materials tab starts from: NDS Supplement Table 4A
   // (visually graded dimension lumber, 2 to 4 in thick), Table 4B (Southern Pine, whose values are given by width,
@@ -3305,6 +3430,7 @@ if (IS_NODE && require.main === module) {
   }
 
   const api = { LOAD_TYPES, guessLoadType, asce7Combos, iShapeProps, compression, flexure, shear, cbOf, momentAt, checkSteelMember,
+    ROD_GRADES, rodGradeOf, checkRodMember,
     PSI, NDS_GRADES, LRFD_F, ndsGradeValues, nominalIn, sizeFactor, flatUse, beamLe, checkWoodMember };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Design = api;
@@ -6352,9 +6478,13 @@ function load() {
 
 let recalcTimer = null;
 // A cable (tensionOnly) is always pinned at both ends and never a rigid member: kept so after every change, whatever
-// made it (a split, the hinge tool, a paste), so the drawing shows what the solver takes it to be
+// made it (a split, the hinge tool, a paste), so the drawing shows what the solver takes it to be. Pretension is a
+// cable's alone: a member that is no longer a cable loses it.
 function tidyCables(m = st.model) {
-  for (const mb of m.members) if (mb.tensionOnly) { mb.hingeI = true; mb.hingeJ = true; delete mb.rigid; }
+  for (const mb of m.members) {
+    if (mb.tensionOnly) { mb.hingeI = true; mb.hingeJ = true; delete mb.rigid; }
+    if (mb.pretension != null && !(mb.tensionOnly && mb.pretension > 0)) delete mb.pretension;
+  }
 }
 // st.rev counts the changes to the model: the caches of what is drawn from it compare it. (The undo stack's length
 // cannot tell: it stops growing at 200 steps, and after that a change left the drawn loads as they were.)
@@ -6464,6 +6594,29 @@ const hasCables = (m = st.model) => m.members.some(mb => mb.tensionOnly);
 const loadedAlongIn = (mb, m = st.model) => m.cases.filter(c => { const L = m.loads[c.id]; return L && FrameSolver.cableLoadKind(L.members[mb.id]); }).map(c => c.name);
 // a cable can take no load along its length: the message for a load tool, or Properties, that was about to put one there
 const cableLoadMsg = mb => `Member ${mb.id} is a cable (tension only): it takes load only at its ends. Put the load on one of its nodes (${mb.i} or ${mb.j}).`;
+// The pretensioned cables as the structure takes them, whatever the loads (FrameSolver.pretension: worked out once
+// per structure): { ids, asked, got (kN, with no load), short (ids that cannot get theirs), e (Map: id -> shortening,
+// m) }; null with none, or when the structure cannot be analysed (the analysis says why)
+function pretensionState(m = st.model) {
+  if (!m.members.some(mb => mb.tensionOnly && mb.pretension > 0)) return null;
+  try { return FrameSolver.pretension(solverModel(m), { shear: !!m.shearDef, axialRigid: !!m.axialRigid }); } catch (e) { return null; }
+}
+// in words, for Properties and the Results tab: what each of these cables gets, where it is not what was set
+// (red), or (one cable) what its pretension means; '' when there is nothing to say
+function pretensionNote(mbs, m = st.model) {
+  const ps = pretensionState(m);
+  if (!ps) return '';
+  const list = ids => (ids.length === 1 ? `member ${ids[0]}` : `members ${ids.slice(0, -1).join(', ')} and ${ids[ids.length - 1]}`);
+  const out = [];
+  for (const mb of mbs) {
+    const k = ps.ids.indexOf(mb.id);
+    if (k < 0) continue;
+    const got = Math.max(0, ps.got[k]), others = ps.short.filter(id => id !== mb.id);
+    if (!ps.short.includes(mb.id)) { if (mbs.length === 1) out.push(`<p class="hint">With no load it carries ${fq('force', ps.asked[k])}: it is made ${fdisp(ps.e.get(mb.id))} ${unit('disp')} shorter than its nodes are apart, as much as gives that once the structure has given way to the pull.</p>`); continue; }
+    out.push(`<p class="hint" style="color:var(--danger)">Member ${mb.id} ${got <= 1e-6 * ps.asked[k] ? 'cannot be pretensioned: nothing resists shortening it (the structure just moves), so it carries none' : `gets ${fq('force', got)} with no load, not ${fq('force', ps.asked[k])}: it is tightened together with ${others.length ? list(others) : 'the rest of the structure'} (tightening one tightens the other), so their pretensions cannot all be as set. This is the nearest the structure allows; give them pretensions that fit (on a symmetric X brace, the same)`}.</p>`);
+  }
+  return out.join('');
+}
 // analysis of one load case or combination; throws when the structure cannot be analysed
 // (m: another model to analyse, such as the beam solver's copy; by default the model itself)
 function analyzeFor(active, opts, m = st.model) {
@@ -8752,6 +8905,8 @@ function render(cursorOnly = false) {
     g.appendChild(el('line', { x1: ax, y1: ay, x2: bx, y2: by, stroke: del ? C.del : sel ? C.accent : C.ink, 'stroke-width': cable ? (del || sel ? 3 : 1.5) : del || sel ? 4 : 2.4, 'stroke-linecap': 'round', opacity: faded && !del ? 0.35 : 1, ...(slack ? { 'stroke-dasharray': '6 4' } : {}) }));
     const len = Math.hypot(bx - ax, by - ay) || 1, ux = (bx - ax) / len, uy = (by - ay) / len;
     if (slack && len > 46) g.appendChild(el('text', { x: ax + (bx - ax) * 0.3 - uy * 10, y: ay + (by - ay) * 0.3 + ux * 10 + 4, 'text-anchor': 'middle', class: 'lbl-id' }, 'slack'));
+    // a pretensioned cable, on the model: its pretension, on the other side from where "slack" goes
+    if (cable && mb.pretension > 0 && !faded && len > 70) g.appendChild(el('text', { x: ax + (bx - ax) * 0.7 + uy * 11, y: ay + (by - ay) * 0.7 - ux * 11 + 4, 'text-anchor': 'middle', class: 'lbl-id' }, `T₀ ${fq('force', mb.pretension)}`));
     const hinge = (cx, cy, end) => {
       const d = delHinge(mb.id, end);
       if (d) glowDot(cx, cy, 10);
@@ -11521,7 +11676,7 @@ function panelInfluence() {
   const pathText = st.inflPath && st.inflPath.length ? `members ${path.map(mb => mb.id).join(', ')} (chosen)` : `all members except vertical ones${hasCables() ? ' and cables' : ''} (${path.map(mb => mb.id).join(', ') || 'none'})`;
   let h = `<h3>Influence line</h3>
   <p class="hint">A unit load (1 ${unit('force')}, downward) moves along the load path; the line shows ${t ? '<b>' + esc(inflTargetText(t)) + '</b>' : 'the chosen quantity'} for each position of the load. The model's own loads are not used.</p>
-  ${hasCables() ? '<p class="hint" style="color:var(--danger)">The cables (tension only) are taken as ordinary truss bars here, pushing as well as pulling: an influence line adds up the effects of loads, which a cable that goes slack does not allow. Check the worst positions with load cases.</p>' : ''}`;
+  ${hasCables() ? '<p class="hint" style="color:var(--danger)">The cables (tension only) are taken as ordinary truss bars here, pushing as well as pulling and without pretension: an influence line adds up the effects of loads, which a cable that goes slack does not allow. Check the worst positions with load cases.</p>' : ''}`;
   if (!t) return h + `<p class="hint"><b>Click a support</b> on the drawing for a reaction, or <b>a point on a member</b> for M, V or N there.</p>`;
   const qs = t.kind === 'reaction' ? (() => { const s = (nodeById(t.node) || {}).support || {}; return ['ry', 'rx', 'mz'].filter(q => s[{ ry: 'y', rx: 'x', mz: 'r' }[q]] !== 'free'); })() : ['M', 'V', 'N'];
   h += `<div class="row" style="gap:6px;flex-wrap:wrap">${qs.map(q => `<button class="btn small${q === t.q ? ' on' : ''}" data-infl-q="${q}">${INFL_Q[q]}</button>`).join('')}</div>`;
@@ -11740,7 +11895,8 @@ function updateReadout(px, py) {
       ? `V max ${fmt(toU(q, -lerp('Vmin')))}  (${p.VminBy})\nV min ${fmt(toU(q, -lerp('Vmax')))}  (${p.VmaxBy})`
       : `${key} max ${fmt(toU(q, sv(key, lerp(key + 'max'))))}  (${p[key + 'maxBy']})\n${key} min ${fmt(toU(q, sv(key, lerp(key + 'min'))))}  (${p[key + 'minBy']})`;
     ro.textContent = head + [row('N', 'force'), row('V', 'force'), row('M', 'moment')].join('\n') + `\nunits ${unit('force')}, ${unit('moment')}`;
-  } else ro.textContent = head + (st.results.slack && st.results.slack.includes(hm.mb.id) ? 'slack: a cable these loads would push\n' : '') +
+  } else ro.textContent = head + (st.results.slack && st.results.slack.includes(hm.mb.id) ? `slack: a cable these loads would push${hm.mb.pretension > 0 ? ', past its pretension' : ''}\n` : '') +
+    (hm.mb.tensionOnly && hm.mb.pretension > 0 ? `pretension T₀ = ${fq('force', hm.mb.pretension)} (with no load)\n` : '') +
     `N = ${fmt(toU('force', lerp('N')))} ${unit('force')}\nV = ${fmt(toU('force', (displayOpts().flipV ? -1 : 1) * lerp('V')))} ${unit('force')}\n` +
     `M = ${fmt(toU('moment', shownM(lerp('M'))))} ${unit('moment')}\nδ = ${fdisp(Math.hypot(lerp('u'), lerp('v')))} ${unit('disp')}` +
     // with the deformed shape shown: every part of the movement, and the rotation
@@ -12965,8 +13121,12 @@ function panelProps() {
     </div>
     <div class="box" data-box="cable"><h3>Cable</h3>
       <div class="row"><label class="chk" title="A cable or rod brace: it pulls, but goes slack instead of pushing"><input type="checkbox" id="m-cable" ${cab ? 'checked' : ''}> Tension only (a cable or rod)${someCab && !cab ? ' <span class="hint">(some)</span>' : ''}</label></div>
-      <p class="hint">${someCab ? `It pulls, and goes slack (no force) where the loads would push it, as rod bracing does. Each load case and combination is analysed on its own until every cable is taut or slack. Pinned at both ends, straight: no sag or pretension. Its own weight goes half to each end; other loads go on its nodes.${cab ? '' : ' The settings below leave cables out.'}`
+      <p class="hint">${someCab ? `It pulls, and goes slack (no force) where the loads would push it, as rod bracing does. Each load case and combination is analysed on its own until every cable is taut or slack. Pinned at both ends, straight: no sag. Its own weight goes half to each end; other loads go on its nodes.${cab ? '' : ' The settings below leave cables out.'}`
         : 'Tick for a member that can only pull, such as a cable or a rod brace (no load along it).'}</p>
+      ${cab ? (() => { // pretension: the force it is tightened to, before any load
+        const same = mbs.every(x => (x.pretension || 0) === (mb.pretension || 0));
+        return `<div class="fields"><label for="m-pre" title="The force the cable is tightened to (turnbuckle, gauge) before any load: with no load on the structure it carries this. Blank or 0: none.">Pretension T<sub>0</sub></label><input type="number" id="m-pre" step="any" min="0" value="${same && mb.pretension > 0 ? uv('force', mb.pretension) : ''}" placeholder="${same ? 'none' : '(differ)'}"><span class="unit">${unit('force')}</span></div>
+        ${pretensionNote(mbs)}`; })() : ''}
     </div>
     ${cab ? '' : (() => { // deformation constraints, as Ftool's: flexible (axial, shear) or rigid
       const ds = mbs.map(x => memberDeform(x)), all = k => ds.every(k), some = k => ds.some(k);
@@ -13186,6 +13346,7 @@ panel.addEventListener('change', e => {
         const ml = () => { const L = caseLoads(caseId, true); return (L.members[mb.id] = L.members[mb.id] || {}); };
         if (mb.tensionOnly && (CABLE_SKIP.includes(id) || (mixed && LOAD_ID.test(id)))) continue;
         if (id === 'm-cable') { if (v) mb.tensionOnly = true; else delete mb.tensionOnly; } // (tidyCables pins it)
+        else if (id === 'm-pre') { if (!mb.tensionOnly) continue; const T = fromU('force', f); if (T > 0) mb.pretension = T; else delete mb.pretension; } // (blank, 0 or less: none)
         else if (id === 'm-mat') mb.material = v ? Number(v) : null;
         else if (id === 'm-sec') mb.section = v ? Number(v) : null;
         else if (id === 'm-hi') mb.hingeI = v; else if (id === 'm-hj') mb.hingeJ = v;
@@ -13197,6 +13358,13 @@ panel.addEventListener('change', e => {
         else if (id === 'md-braced') { mb.design = { ...(mb.design || {}) }; if (v) mb.design.Lb = 0; else delete mb.design.Lb; if (!Object.keys(mb.design).length) delete mb.design; }
         else if (id === 'md-defl') { if (v === '') continue; mb.design = { ...(mb.design || {}) }; if (v === 'on' || v === 'off') mb.design.defl = v; else delete mb.design.defl; if (!Object.keys(mb.design).length) delete mb.design; }
         else if (id === 'md-rep') { mb.design = { ...(mb.design || {}) }; if (v) mb.design.rep = true; else delete mb.design.rep; if (!Object.keys(mb.design).length) delete mb.design; }
+        // a rod's grade ('auto': from its material's name) and ends ('threaded', the default, or 'upset'); '' is
+        // "(differ)", which changes nothing; for the rods in the selection only
+        else if (id === 'md-grade' || id === 'md-ends') {
+          if (v === '' || !steelCheckable(mb).rod) continue;
+          const k = id === 'md-grade' ? 'grade' : 'ends', keep = id === 'md-grade' ? (v !== 'auto' && Design.ROD_GRADES[v] ? v : null) : (v === 'upset' ? v : null);
+          mb.design = { ...(mb.design || {}) }; if (keep) mb.design[k] = keep; else delete mb.design[k]; if (!Object.keys(mb.design).length) delete mb.design;
+        }
         else if (id.startsWith('md-')) { // steel and wood check settings: blank goes back to the default
           const k = id.slice(3), blank = t.value.trim() === '' || !(f > 0 || (k === 'Lb' && f === 0 && /^\s*0*\.?0*\s*$/.test(t.value)));
           mb.design = { ...(mb.design || {}) };
@@ -13666,6 +13834,8 @@ const steelMethod = (m = st.model) => (m.design && m.design.method) || (m.comboG
 function steelCheckable(mb, m = st.model) {
   const mat = m.materials.find(x => x.id === mb.material), sec = m.sections.find(x => x.id === mb.section);
   if (!mat || mat.kind !== 'steel') return { why: mat ? `${mat.name} is not steel` : 'no material' };
+  // a round bar used as a cable: the rod check (tension: yielding and the threads)
+  if (sec && sec.type === 'circle') return mb.tensionOnly ? { mat, sec, rod: true, grade: rodGrade(mb, mat) } : { why: `${sec.name} is a round bar: it is checked as a tension rod when it is a cable (tension only)` };
   if (!sec || sec.type !== 'I') return { why: sec ? `${sec.name} is not an I-section` : 'no section' };
   return { mat, sec, Fy: defaultLimitStress(mat), fyFrom: mat.Fy > 0 ? 'set' : 'name' };
 }
@@ -13744,6 +13914,14 @@ function memberCheckable(mb, m = st.model) {
   if (mat && mat.kind !== 'steel') return { why: `${mat.name} is ${mat.kind}: steel and wood members are checked` };
   return steelCheckable(mb, m);
 }
+// a rod's grade: picked in the Design tab (mb.design.grade), else the one its material's name points to (A992: A572 Gr
+// 50, the same Fy and Fu), else A36. { name, Fy, Fu (MPa), from: 'set' | 'name' | 'default' }
+function rodGrade(mb, mat) {
+  const set = (mb.design || {}).grade;
+  if (set && Design.ROD_GRADES[set]) return { name: set, from: 'set', ...Design.ROD_GRADES[set] };
+  const g = Design.rodGradeOf(mat && mat.name);
+  return g ? { name: g, from: 'name', ...Design.ROD_GRADES[g] } : { name: 'A36', from: 'default', ...Design.ROD_GRADES.A36 };
+}
 function checkRuns(m = st.model) {
   const combos = envelopeRuns('env', m);
   if (combos.length) return { runs: combos, kind: 'combinations' };
@@ -13775,6 +13953,11 @@ function steelChecks() {
       if (c.wood) {
         res = Design.checkWoodMember(c.sec.dims, c.vals, memberFrame(mb).L, sts, { ...(mb.design || {}), runL, method, time: time.f, wet: woodWet(m), cantilever: isCantilever(mb, m) });
         if (!cur || res.ratio > cur.res.ratio) members.set(mb.id, { wood: true, res, run: run.name, types: time.types, mat: c.mat, sec: c.sec, from: c.from, grade: c.grade, past: runsOnPast(mb, m), runIds: runsBy.get(mb.id).members.map(x => x.id) });
+        continue;
+      }
+      if (c.rod) { // a steel rod used as a cable: its tension, against yielding and the threads
+        res = Design.checkRodMember(c.sec.dims, c.grade, sts, { method, ends: (mb.design || {}).ends });
+        if (!cur || res.ratio > cur.res.ratio) members.set(mb.id, { rod: true, res, run: run.name, mat: c.mat, sec: c.sec, grade: c.grade });
         continue;
       }
       res = Design.checkSteelMember(c.sec.dims, { E: c.mat.E, Fy: c.Fy }, memberFrame(mb).L, sts, { ...(mb.design || {}), runL, method, cantilever: isCantilever(mb, m), tensionOnly: !!mb.tensionOnly });
@@ -13832,7 +14015,8 @@ function addDeflections(m, members) {
     // set by hand in the Design tab (for the whole run: Check wins), or by default only beams and rafters: a column
     // or a stud (steeper than 60°) has no deflection limit here
     const mode = deflMode(run.members);
-    if (mode === 'off' || (mode === 'auto' && (!deflAuto(run) || run.members.some(x => x.tensionOnly)))) continue; // (nor a cable)
+    // (nor a cable, even if set to Check: a straight bar here, its sag not modelled)
+    if (run.members.some(x => x.tensionOnly) || mode === 'off' || (mode === 'auto' && !deflAuto(run))) continue;
     // an analysis's displacement across the run at every station (stations share positions across analyses)
     const field = S => {
       const pts = [];
@@ -13924,6 +14108,7 @@ const ratioHTML = r => `<span class="ratio ${ratioClass(r)}"><i><b style="width:
 // what governs, in words
 function governsWords(res) {
   if (res.governs === 'deflection') return `deflection (${res.defl.which}, L/${res.defl.lim[res.defl.which]})`;
+  if (res.rod) return !(res.worst.N > 0) ? 'slack under every load: no force' : res.governs === 'threads' ? 'tension: the threads (J3)' : 'tension: yielding (D2)';
   if (res.product) { // wood
     const w = res.worst.combined;
     if (res.governs === 'shear') return 'shear (fv ≤ Fv′)';
@@ -13954,7 +14139,7 @@ function drawSteelCheck(g, C) {
 function steelLegend() {
   const sc = steelChecks(), done = [...sc.members.values()].filter(c => c.res), n = st.model.members.length;
   if (!n) return '';
-  if (!done.length) return 'Member check: no member is steel with an I-section, or wood with a rectangular section.';
+  if (!done.length) return 'Member check: no member is steel with an I-section, a steel rod used as a cable, or wood with a rectangular section.';
   const worst = Math.max(...done.map(c => c.res.ratio)), fails = done.filter(c => c.res.ratio > 1 + 1e-9).length;
   const codes = [done.some(c => !c.wood) && 'AISC 360-22', done.some(c => c.wood) && 'NDS 2018'].filter(Boolean).join(' and ');
   return `${done.some(c => !c.wood) ? (done.some(c => c.wood) ? 'Steel and wood check' : 'Steel check') : 'Wood check'}, ${codes} ${sc.method.toUpperCase()}: worst of ${runsWords(sc)}${sc.kind === 'load cases' && sc.method === 'lrfd' ? ' (unfactored: add combinations)' : ''} · `
@@ -13964,7 +14149,7 @@ function steelReadout(mb) {
   const c = steelChecks().members.get(mb.id);
   if (!c) return '';
   if (c.why) return `Member ${mb.id}: not checked (${c.why})`;
-  const w = c.res.governs === 'shear' ? c.res.worst.shear : c.res.worst.combined, dfl = c.res.governs === 'deflection';
+  const w = c.res.rod ? c.res.worst : c.res.governs === 'shear' ? c.res.worst.shear : c.res.worst.combined, dfl = c.res.governs === 'deflection';
   return `Member ${mb.id} · ${c.sec.name}\nratio ${c.res.ratio.toFixed(2)}: ${governsWords(c.res)}\n${dfl ? (c.res.defl[c.res.defl.which].case || 'dead load') : c.run}\n${dfl ? `${fq('disp', c.res.defl[c.res.defl.which].d)}, ${fLen(c.res.defl[c.res.defl.which].t)} from node ${c.res.defl.from}` : `at ${fLen(w.x)} from node ${mb.i}`}\nclick it for its lengths and the working`;
 }
 // The Design tab: design checks, the steel check (AISC 360-22) now, and wood and others to come. With members
@@ -13973,9 +14158,10 @@ function panelDesign() {
   const mbs = [...st.sel.members].map(memberById).filter(Boolean);
   const big = !st.checkCache && st.model.members.length >= BACKGROUND_FROM;
   const isWood = mb => { const mat = st.model.materials.find(x => x.id === mb.material); return !!mat && mat.kind === 'wood'; };
+  const isRod = mb => !isWood(mb) && !!steelCheckable(mb).rod, rods = mbs.filter(isRod), steels = mbs.filter(x => !isWood(x) && !isRod(x));
   const askNow = name => `<div class="row"><h3 style="flex:1">${name}</h3><button class="btn small" data-act="steel-run">Check now</button></div><p class="hint">On a model this large every member is checked when asked.</p>`;
   return `<h3>Design checks</h3>
-    ${mbs.length ? (mbs.some(isWood) ? woodBox(mbs.filter(isWood)) : '') + (mbs.some(x => !isWood(x)) ? steelBox(mbs.filter(x => !isWood(x))) : '') : '<p class="hint">Select a member (or several) to set its unbraced lengths and factors for the steel or wood check, and to see its ratio.</p>'}
+    ${mbs.length ? (mbs.some(isWood) ? woodBox(mbs.filter(isWood)) : '') + (rods.length ? rodBox(rods) : '') + (steels.length ? steelBox(steels) : '') : '<p class="hint">Select a member (or several) to set its unbraced lengths and factors for the steel or wood check, or a rod\'s grade, and to see its ratio.</p>'}
     <div class="box">${big ? askNow('Steel check') : steelResultsPanel(true)}
       <p class="hint">The Check view at the top colours each member by its ratio.</p></div>
     <div class="box">${big ? askNow('Wood check (NDS 2018)') : woodResultsPanel()}
@@ -13987,8 +14173,9 @@ function deflBox() {
   const lim = deflLimits(), mbs = [...st.sel.members].map(memberById).filter(Boolean);
   // the selected members' setting: Auto (by slope), Check or Don't check; blank when they differ
   const cur = ['auto', 'on', 'off'].find(k => mbs.length && mbs.every(x => ((x.design || {}).defl || 'auto') === k)) || '';
-  const autoWord = mbs.length === 1 ? (mbs[0].tensionOnly ? 'not checked: a cable' : deflAuto(straightRun(mbs[0])) ? 'checked: a beam' : 'not checked: steeper than 60°') : 'by slope';
-  const pick = mbs.length ? `<label for="md-defl" title="Auto: beams and rafters (not steeper than 60°) are checked, columns and studs are not. Check or Don't check overrides it for a sloped brace, a leaning column that carries a beam, and so on. A member in a straight run with others sets the whole run (Check wins).">${mbs.length > 1 ? 'Selected' : 'Member ' + mbs[0].id}</label><select id="md-defl">${cur ? '' : '<option value="" selected>(differ)</option>'}${opt('auto', 'Auto (' + autoWord + ')', cur)}${opt('on', 'Check', cur)}${opt('off', 'Don\'t check', cur)}</select><span></span>` : '';
+  const autoWord = mbs.length === 1 ? (deflAuto(straightRun(mbs[0])) ? 'checked: a beam' : 'not checked: steeper than 60°') : 'by slope';
+  const cablesOnly = mbs.length && mbs.every(x => x.tensionOnly);
+  const pick = mbs.length && !cablesOnly ? `<label for="md-defl" title="Auto: beams and rafters (not steeper than 60°) are checked, columns and studs are not. Check or Don't check overrides it for a sloped brace, a leaning column that carries a beam, and so on. A member in a straight run with others sets the whole run (Check wins).">${mbs.length > 1 ? 'Selected' : 'Member ' + mbs[0].id}</label><select id="md-defl">${cur ? '' : '<option value="" selected>(differ)</option>'}${opt('auto', 'Auto (' + autoWord + ')', cur)}${opt('on', 'Check', cur)}${opt('off', 'Don\'t check', cur)}</select><span></span>` : '';
   return `<div class="box"><h3>Deflection</h3>
     <label class="chk" title="Service loads: each gravity load case unfactored, over the straight run of members between supports or joints"><input type="checkbox" id="df-on" ${lim.on ? 'checked' : ''}> Check deflection of steel and wood beams</label>
     ${lim.on ? `<div class="fields">
@@ -13996,6 +14183,7 @@ function deflBox() {
       <label for="df-total" title="Dead load (times Kcr for wood: 1.5 dry, 2.0 wet) plus each other load case">Total</label><div class="row" style="gap:4px">L / <input type="number" id="df-total" min="1" step="any" value="${lim.total}" style="flex:1"></div><span></span>
       ${pick}
     </div>
+    ${cablesOnly ? `<p class="hint">${mbs.length > 1 ? 'Cables have' : 'A cable has'} no deflection check: ${mbs.length > 1 ? 'they are' : 'it is'} a straight bar here, without sag.</p>` : ''}
     <p class="hint">Beams and rafters (not steeper than 60°) unless set for the selected members, under the unfactored load cases by their type (Load → ASCE 7…): wind and earthquake are left out; wood's dead load deflection × K<sub>cr</sub> 1.5 (2.0 wet) for creep. A cantilever takes L = 2 × its length.</p>` : ''}
   </div>`;
 }
@@ -14039,7 +14227,7 @@ function woodResultsPanel() {
 // the box in the Design tab for the selected members: their lengths for the check, and their result
 function steelBox(mbs) {
   const mb = mbs[0], multi = mbs.length > 1, chk = steelCheckable(mb);
-  if (chk.why && !multi) return `<div class="box"><h3>Steel check</h3><p class="hint">Not checked: ${esc(chk.why)}. The AISC 360 check covers steel I-sections.</p></div>`;
+  if (chk.why && !multi) return `<div class="box"><h3>Steel check</h3><p class="hint">Not checked: ${esc(chk.why)}. The AISC 360 check covers steel I-sections, and steel rods used as cables.</p></div>`;
   const d = mb.design || {}, same = k => mbs.every(x => ((x.design || {})[k] == null ? null : x.design[k]) === (d[k] == null ? null : d[k]));
   const lenIn = (k, ph, tip) => `<label for="md-${k}" title="${tip}">${k[0]}<sub>${k.slice(1)}</sub></label><input type="number" id="md-${k}" step="any" min="0" value="${same(k) && d[k] != null && d[k] >= 0 ? uv('len', d[k]) : ''}" placeholder="${ph}" title="${tip}"><span class="unit">${unit('len')}</span>`;
   const numIn = (k, ph, tip) => `<label for="md-${k}" title="${tip}">${k[0]}<sub>${k.slice(1)}</sub></label><input type="number" id="md-${k}" step="any" min="0" value="${same(k) && d[k] > 0 ? d[k] : ''}" placeholder="${ph}" title="${tip}"><span></span>`;
@@ -14062,6 +14250,58 @@ function steelBox(mbs) {
     ${c && c.res ? `<div class="row"><span>Ratio ${ratioHTML(c.res.ratio)}</span><span class="hint">${esc(governsWords(c.res))} · ${esc(c.run)}</span><button class="btn small" data-act="steel-open" data-id="${mb.id}">Working…</button></div>` : multi ? '<p class="hint">These lengths are set for every selected member.</p>' : ''}
   </div>`;
 }
+// the box in the Design tab for the selected steel rods (cables with a round section): grade and ends, and the result
+function rodBox(mbs) {
+  const mb = mbs[0], multi = mbs.length > 1, mat = st.model.materials.find(x => x.id === mb.material);
+  const same = k => mbs.every(x => ((x.design || {})[k] || '') === ((mb.design || {})[k] || ''));
+  const stress = g => `F<sub>y</sub> ${fsig(toU('stress', g.Fy))}, F<sub>u</sub> ${fsig(toU('stress', g.Fu))} ${unit('stress')}`;
+  const g0 = rodGrade(mb, mat), auto = rodGrade({}, mat); // (auto: what the material's name gives, else A36)
+  const autoText = auto.from === 'name' ? `From the material: ${auto.name}` : 'A36 (the material does not say)';
+  const gradeOpts = (same('grade') ? '' : '<option value="" selected>(differ)</option>')
+    + `<option value="auto"${same('grade') && !(mb.design || {}).grade ? ' selected' : ''}>${esc(autoText)}</option>`
+    + Object.keys(Design.ROD_GRADES).map(k => `<option value="${esc(k)}"${same('grade') && (mb.design || {}).grade === k ? ' selected' : ''}>${esc(k)}</option>`).join('');
+  const upset = (mb.design || {}).ends === 'upset';
+  const endOpts = (same('ends') ? '' : '<option value="" selected>(differ)</option>')
+    + `<option value="threaded"${same('ends') && !upset ? ' selected' : ''}>Threaded</option><option value="upset"${same('ends') && upset ? ' selected' : ''}>Upset, or no threads</option>`;
+  const ask = !multi && !st.checkCache && st.model.members.length >= BACKGROUND_FROM;
+  const c = !multi && !ask && steelChecks().members.get(mb.id);
+  return `<div class="box"><h3>Rod check (AISC 360-22)</h3>
+    <div class="fields">
+      <label for="md-grade" title="The rod's steel, for Fy and Fu. Blank: from the material's name (A992 gives A572 Gr 50, the same Fy and Fu), else A36.">Grade</label><select id="md-grade">${gradeOpts}</select><span></span>
+      <label for="md-ends" title="Threaded: a plain rod threaded at its ends, whose threads can break first (0.75 Fu on the rod's area). Upset, or no threads: the threads on a larger diameter, or none (welded ends), so the body yields first.">Ends</label><select id="md-ends">${endOpts}</select><span></span>
+    </div>
+    ${multi ? '<p class="hint">These are set for every selected rod.</p>' : `<p class="hint">${esc(g0.name)}: ${stress(g0)}. Tension only: yielding of the body (D2) and, threaded, the threads (J3).</p>`}
+    ${ask ? '<div class="row"><span class="hint" style="flex:1">On a model this large the ratio is worked out when asked.</span><button class="btn small" data-act="steel-run">Check now</button></div>' : ''}
+    ${c && c.res ? `<div class="row"><span>Ratio ${ratioHTML(c.res.ratio)}</span><span class="hint">${esc(governsWords(c.res))} · ${esc(c.run)}</span><button class="btn small" data-act="steel-open" data-id="${mb.id}">Working…</button></div>` : ''}
+  </div>`;
+}
+// the working for one rod: its grade and area, both strengths, and the ratio
+function rodWorking(mb, sc) {
+  const c = sc.members.get(mb.id);
+  if (!mb || !c || !c.res) return '';
+  const r = c.res, asd = r.method === 'asd', uD = unit('dim'), dk = toU('dim', 1);
+  const dimq = (v, k) => `${fsig(v * dk ** k)} ${uD}${k === 2 ? '²' : ''}`;
+  const S = v => `${+toU('stress', v).toPrecision(4)} ${unit('stress')}`, F = v => fq('force', v);
+  const strength = (name, nominal, phi, om) => `${name}${asd ? '/Ω' : ''} = ${asd ? `${F(nominal)} / ${om.toFixed(2)}` : `${phi.toFixed(2)} × ${F(nominal)}`} = <b>${F(nominal * (asd ? 1 / om : phi))}</b>`;
+  const from = { set: 'picked in the Design tab', name: `from the material's name, ${c.mat.name}`, default: 'the default, as the material does not say: pick the grade in the Design tab' }[c.grade.from];
+  return `<h3>Member ${mb.id}: ${esc(c.sec.name)}, ${esc(c.grade.name)} rod, ${r.threaded ? 'threaded' : 'upset ends or no threads'}</h3>
+  <p class="note">Ratio <b class="${ratioClass(r.ratio)}">${r.ratio.toFixed(3)}</b> — ${esc(governsWords(r))}, under ${esc(c.run)}.${r.worst.N > 0 ? '' : ' It is slack under every load checked, so it carries nothing.'}</p>
+  <div class="eqs">
+    ${esc(c.grade.name)}: F<sub>y</sub> = ${S(r.Fy)}, F<sub>u</sub> = ${S(r.Fu)} <span class="hint">(${esc(from)})</span><br>
+    d = ${dimq(r.d, 1)}, A<sub>g</sub> = πd²/4 = ${dimq(r.Ag, 2)}
+  </div>
+  <h3>Yielding of the body (D2a)</h3>
+  <div class="eqs">P<sub>n</sub> = F<sub>y</sub> A<sub>g</sub> = ${F(r.yieldN)}; ${strength(asd ? 'P<sub>n</sub>' : 'φ<sub>t</sub>P<sub>n</sub>', r.yieldN, 0.9, 1.67)}</div>
+  <h3>Threads (J3, Table J3.2)</h3>
+  <div class="eqs">${r.threaded ? `F<sub>nt</sub> = 0.75 F<sub>u</sub> = ${S(r.Fnt)}; R<sub>n</sub> = F<sub>nt</sub> A<sub>b</sub> = ${F(r.threadN)}; ${strength(asd ? 'R<sub>n</sub>' : 'φR<sub>n</sub>', r.threadN, 0.75, 2.0)} <span class="hint">(A<sub>b</sub>: the nominal area of the unthreaded body, A<sub>g</sub>)</span>`
+    : 'Upset ends, or no threads: any threads are on a larger diameter, made stronger than the body, so yielding governs. Set Ends to Threaded (Design tab) for a plain threaded rod.'}</div>
+  <h3>Under ${esc(c.run)}</h3>
+  <div class="eqs">Tension T = ${F(r.worst.N)} → T / ${F(r.cap)} = <b>${r.ratio.toFixed(3)}</b></div>`;
+}
+// what the rod check covers, under the working
+const rodCovers = sc => `<h3>What the rod check covers</h3>
+    <p class="note">AISC 360-22 for steel rods used as cables (a round solid section, tension only): yielding of the body (D2a) and, for a threaded rod, rupture of the threads (J3, Table J3.2: F<sub>nt</sub> = 0.75 F<sub>u</sub> on the rod's nominal area). ${sc.method === 'lrfd' ? 'LRFD: φ × nominal strength.' : 'ASD: nominal strength / Ω.'} No slenderness limit applies to rods in tension (D1).</p>
+    <p class="note">F<sub>y</sub> and F<sub>u</sub> come from the grade picked in the Design tab, or from the material's name (A36, A572 Gr 50 for A992, F1554, A193 B7, S235 to S355), else A36. Not covered: the connection (clevis, turnbuckle, plate or weld), wire rope and strand (use the maker's breaking strength), and sag.</p>`;
 // the dialog: every member's ratio, and the full working for the one picked
 function openSteelCheck(id) {
   if (id != null) st.checkPick = id;
@@ -14083,12 +14323,13 @@ function drawSteelDialog() {
     ${rows.map(({ mb, c }) => c.res
       ? `<tr class="pick${mb.id === st.checkPick ? ' on' : ''}" data-pick="${mb.id}"><td class="l">${mb.id}</td><td class="l">${esc(c.sec.name)}</td><td class="r">${fLen(memberFrame(mb).L)}</td><td class="l">${ratioHTML(c.res.ratio)}</td><td class="l">${esc(governsWords(c.res))}</td><td class="l">${esc(c.run)}</td></tr>`
       : `<tr><td class="l">${mb.id}</td><td class="l" colspan="5"><span class="hint">not checked: ${esc(c.why)}</span></td></tr>`).join('')}</table>
-    ${st.checkPick != null ? ((sc.members.get(st.checkPick) || {}).wood ? woodWorking : steelWorking)(memberById(st.checkPick), sc) : ''}
+    ${st.checkPick != null ? (c => (c.wood ? woodWorking : c.rod ? rodWorking : steelWorking))(sc.members.get(st.checkPick) || {})(memberById(st.checkPick), sc) : ''}
     ${[...sc.members.values()].some(c => c.wood && c.res) ? woodCovers(sc) : ''}
-    ${[...sc.members.values()].some(c => c.wood && c.res) && ![...sc.members.values()].some(c => c.res && !c.wood) ? '' : `<h3>What the steel check covers</h3>
+    ${[...sc.members.values()].some(c => c.rod && c.res) ? rodCovers(sc) : ''}
+    ${(() => { const cs = [...sc.members.values()].filter(c => c.res); return cs.some(c => !c.wood && !c.rod) || !cs.length; })() ? `<h3>What the steel check covers</h3>
     <p class="note">AISC 360-22 for doubly symmetric I-shapes bent about the strong axis: tension yielding (D2), flexural buckling in compression (E3, with E7 effective widths of slender elements), yielding and lateral-torsional buckling in bending (F2) and flange local buckling (F3), shear yielding of the web (G2.1), and axial force with bending (H1.1). ${sc.method === 'lrfd' ? 'LRFD: φ × nominal strength.' : 'ASD: nominal strength / Ω.'}</p>
     <p class="note">The moments are first-order. For a frame that sways, or a member with a large axial load, amplify them for second-order effects (B1 and B2 in AISC Appendix 8) or use the direct analysis method, or allow some margin under 1.0. Not covered: tension rupture at connections, webs that are not compact in bending (F4, F5), weak-axis bending, torsion, local loads on the web, and connections.</p>
-    <p class="note">Section properties come from the plates (d, bf, tw, tf) without the root fillets, 1–5% under the AISC Manual's values (on the safe side). Fy comes from the material (Materials tab), or from its name (A992 → 50 ksi, S355 → 355 MPa) when not set.</p>`}`;
+    <p class="note">Section properties come from the plates (d, bf, tw, tf) without the root fillets, 1–5% under the AISC Manual's values (on the safe side). Fy comes from the material (Materials tab), or from its name (A992 → 50 ksi, S355 → 355 MPa) when not set.</p>` : ''}`;
 }
 // the working for one member: properties, lengths, each strength and the governing ratio
 function steelWorking(mb, sc) {
@@ -14225,8 +14466,8 @@ function steelResultsPanel(designTab) {
     <p class="hint">AISC 360-22, worst of ${runsWords(sc)}.${sc.kind === 'load cases' && sc.method === 'lrfd' ? ' <span style="color:var(--danger)">These are unfactored: make the combinations first (Load → ASCE 7…).</span>' : ''} First-order moments: see the working for what is covered.</p>
     ${methodMismatch(sc) ? `<p class="hint" style="color:var(--danger)">${esc(methodMismatch(sc))}</p>` : ''}
     ${rows.length ? `<div class="list">${rows.map(({ mb, c }) => `<button class="item" data-act="steel-open" data-id="${mb.id}" style="text-align:left;background:none;font:inherit;color:inherit"><span><b>${mb.id}</b> · ${esc(c.sec.name)} <span class="meta">${esc(governsWords(c.res))}</span></span>${ratioHTML(c.res.ratio)}</button>`).join('')}</div>`
-      : '<p class="hint">No member has a steel material and an I-section.</p>'}
-    ${skipped ? `<p class="hint">${skipped} member${skipped > 1 ? 's are' : ' is'} not checked (not steel, or not an I-section): dashed on the drawing.</p>` : ''}`;
+      : '<p class="hint">No member has a steel material and an I-section, or is a steel rod used as a cable.</p>'}
+    ${skipped ? `<p class="hint">${skipped} member${skipped > 1 ? 's are' : ' is'} not checked (not steel, or not an I-section or a rod cable): dashed on the drawing.</p>` : ''}`;
 }
 $('#check-close').addEventListener('click', () => { $('#check-dlg').hidden = true; });
 $('#check-dlg').addEventListener('click', e => {
@@ -14422,6 +14663,7 @@ function panelResults() {
   <div class="tablewrap"><table class="res"><tr><th>Member</th><th>max N</th><th>max V</th><th>max M</th><th>δ ${uD}</th></tr>${rows}</table></div>
   <p class="hint">N, V in ${uF}; M in ${uM}.</p>
   ${R.slack && R.slack.length ? `<p class="hint">Slack: ${R.slack.length === 1 ? 'member' : 'members'} ${R.slack.join(', ')}, ${R.slack.length === 1 ? 'a cable' : 'cables'} these loads would push, so ${R.slack.length === 1 ? 'it carries' : 'they carry'} nothing (dashed on the drawing).</p>` : ''}
+  ${R.pretension ? `<p class="hint">Pretension (with no load): ${R.pretension.ids.map((id, k) => `member ${id} ${fq('force', R.pretension.asked[k])}`).join(', ')}. These results include it.</p>${pretensionNote(R.pretension.short.map(memberById).filter(Boolean))}` : ''}
   <h3>Reactions</h3><div class="tablewrap"><table class="res"><tr><th>Node</th><th>Rx ${uF}</th><th>Ry ${uF}</th><th>M ${uM}</th></tr>${reac}
   <tr><td>Sum</td><td>${F(sum[0])}</td><td>${F(sum[1])}</td><td></td></tr></table></div>
   <h3>Node displacements</h3><div class="tablewrap"><table class="res"><tr><th>Node</th><th>ux ${uD}</th><th>uy ${uD}</th><th>rz rad</th></tr>${disp}</table></div>
@@ -14881,6 +15123,7 @@ function exportFtl() {
   const dedupe = (list, key, make) => { const k = key; let i = list.findIndex(x => x._k === k); if (i < 0) { list.push({ ...make(), _k: k }); i = list.length - 1; } return i + 1; };
   const caseIdx = m.cases.map(c => c.id);
   if (m.members.some(mb => mb.tensionOnly)) notes.push('Cables (tension only) are written as members pinned at both ends: the file has no tension-only setting, so Ftool takes them as ordinary truss bars, which can push too.');
+  if (m.members.some(mb => mb.tensionOnly && mb.pretension > 0)) notes.push('Pretension is not written: Ftool has no such setting.');
   m.members.forEach((mb, k) => {
     const blk = fr.member(k), rev = fr.memberStartsAt(k) !== nIdx.get(mb.i);
     blk.material = mb.material ? m.materials.findIndex(x => x.id === mb.material) + 1 : 0;
@@ -14975,7 +15218,8 @@ function cableStepsNote(r) {
   return `<p><b>Cables.</b> ${list(cables)} ${cables.length === 1 ? 'is a cable' : 'are cables'} (tension only): pinned at both ends, ${cables.length === 1 ? 'it pulls' : 'they pull'} but cannot push.
   Which ones are slack depends on the loads, so the analysis was repeated (${r.cableRounds} round${r.cableRounds === 1 ? '' : 's'}): every cable starts taut, one in compression goes slack, and a slack one whose ends move apart is taut again, until nothing changes.
   ${sl.length ? `Under these loads ${list(sl)} ${one ? 'is' : 'are'} slack and carr${one ? 'ies' : 'y'} nothing: ${kept ? `${one ? 'it is' : 'they are'} kept below with a tiny stiffness (a hundred-millionth of a typical member's EA/L), since without ${one ? 'it' : 'them'} the structure could swing in a direction no load pushes it` : `${one ? 'it is' : 'they are'} left out of the matrices below (no stiffness)`}.` : 'Under these loads every cable is taut.'}
-  The matrices are those of the last analysis.${activeHasSW() ? ' A cable\'s own weight is in the nodal loads, half at each end.' : ''}</p>`;
+  The matrices are those of the last analysis.${activeHasSW() ? ' A cable\'s own weight is in the nodal loads, half at each end.' : ''}
+  ${r.pretension ? `${list(r.pretension.ids).replace(/^m/, 'M')} ${r.pretension.ids.length === 1 ? 'is' : 'are'} pretensioned (${r.pretension.ids.map((id, k) => fq('force', r.pretension.asked[k])).join(', ')} with no load${r.pretension.short.length ? `; ${list(r.pretension.short)} cannot get ${r.pretension.short.length === 1 ? 'its' : 'theirs'}: see Properties` : ''}): each is made shorter than its nodes are apart by as much as gives that force once the structure has given way to the pull, worked out once for the structure. That shortening is in the fixed-end forces below, ±EA·e/L, as a temperature change would be${sl.some(id => r.pretension.ids.includes(id)) ? ' (not for a slack one: it has lost its pretension)' : ''}.` : ''}</p>`;
 }
 
 function stepsHTML() {
@@ -15144,6 +15388,9 @@ function loadDescription(e, F, Lf) {
   if (p1 || p2) parts.push(p1 === p2 ? `axial load p′ = ${q(p1)}` : `axial load p′ from ${q(p1)} to ${q(p2)}`);
   if (tTop || tBot) parts.push(`temperature change top ${fqNum('temp', tTop)} / bottom ${fq('temp', tBot)}`);
   const U = stepUnits(), fl = v => fmtMx(v * Lf, 1e-12), ff = v => fmtMx(v * F, 1e-12);
+  if (e.Npre) parts.push(`pretension: the cable is made e = ${fl(e.pre)} ${U.lu} shorter than its nodes are apart, so held at their distance it pulls N₀ = EA·e/L = ${ff(e.Npre)} ${U.fu}, and f′₀ = [−N₀, 0, 0, +N₀, 0, 0]`);
+  // a cable takes no load along it (its own weight is at its end nodes): its pretension is all there is here
+  if (e.cable) return 'Member load in local axes: ' + parts.join('; ') + '.';
   for (const p of e.ld.points || []) parts.push(`point load at a = ${fl(p.a)} ${U.lu}: P′x = ${ff(p.px)}, P′y = ${ff(p.py)} ${U.fu}${p.m ? `, M = ${fmtMx(p.m * F * Lf, 1e-12)} ${U.fu}·${U.lu}` : ''}`);
   for (const p of e.ld.partials || []) parts.push(`partial load from ${fl(p.a)} to ${fl(p.b)} ${U.lu}: q′ ${q(p.q1)} → ${q(p.q2)}, p′ ${q(p.p1)} → ${q(p.p2)} ${U.fu}/${U.lu}`);
   // the uniform loads above include the member's own weight when the case does
@@ -17182,7 +17429,7 @@ function reportHTML() {
   const date = new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
   const o = reportOpts(), on = k => o.parts[k] !== false, runOn = key => !o.skip.includes(String(key));
   let h = `<h1>${esc(m.title || 'TrussFrame model')}</h1>
-  <p class="meta">TrussFrame · 2D frame analysis report · ${esc(date)}<br>Units: ${unitSummary(', ')} · First-order linear-elastic analysis (direct stiffness method), ${deformSummary() || 'Euler-Bernoulli members with axial deformation'}${hasCables() ? '; cables (tension only) by repeated analysis, each load case and combination on its own, until every cable is taut or slack' : ''}</p>`;
+  <p class="meta">TrussFrame · 2D frame analysis report · ${esc(date)}<br>Units: ${unitSummary(', ')} · First-order linear-elastic analysis (direct stiffness method), ${deformSummary() || 'Euler-Bernoulli members with axial deformation'}${hasCables() ? `; cables (tension only) by repeated analysis, each load case and combination on its own, until every cable is taut or slack${st.model.members.some(mb => mb.tensionOnly && mb.pretension > 0) ? ', with their pretension in every analysis' : ''}` : ''}</p>`;
   if (['drawing', 'nodes', 'members', 'materials', 'sections', 'combos'].some(on)) h += '<h2>Model</h2>';
   // drawings in the Model view style, or with the Custom view's layers (falls back to Model when a case cannot be analysed)
   const useCustom = o.drawStyle === 'custom', layerNames = () => LAYERS.filter(([k]) => customLayers()[k]).map(([, l]) => l).join(', ') || 'nothing ticked';
@@ -17197,7 +17444,7 @@ function reportHTML() {
     `<tr><td>${nd.id}</td><td>${Lx(nd.x)}</td><td>${Lx(nd.y)}</td><td class="l">${supTxt(nd.support)}${nd.angle ? ` at ${nd.angle}°` : ''}</td></tr>`).join('')}</table>`;
   const name = (list, id) => esc((list.find(x => x.id === id) || {}).name || '—');
   if (on('members')) h += `<h3>Members</h3><table><tr><th>Member</th><th>Node i</th><th>Node j</th><th>L [${uL}]</th><th class="l">Material</th><th class="l">Section</th><th class="l">Hinges</th></tr>${m.members.map(mb =>
-    `<tr><td>${mb.id}</td><td>${mb.i}</td><td>${mb.j}</td><td>${Lx(memberFrame(mb).L)}</td><td class="l">${name(m.materials, mb.material)}</td><td class="l">${name(m.sections, mb.section)}</td><td class="l">${mb.tensionOnly ? 'cable: pinned, tension only' : [mb.hingeI ? 'start' : '', mb.hingeJ ? 'end' : ''].filter(Boolean).join(', ') || '—'}</td></tr>`).join('')}</table>`;
+    `<tr><td>${mb.id}</td><td>${mb.i}</td><td>${mb.j}</td><td>${Lx(memberFrame(mb).L)}</td><td class="l">${name(m.materials, mb.material)}</td><td class="l">${name(m.sections, mb.section)}</td><td class="l">${mb.tensionOnly ? `cable: pinned, tension only${mb.pretension > 0 ? `, pretension ${fq('force', mb.pretension)}` : ''}` : [mb.hingeI ? 'start' : '', mb.hingeJ ? 'end' : ''].filter(Boolean).join(', ') || '—'}</td></tr>`).join('')}</table>`;
   if (on('materials')) h += `<h3>Materials</h3><table><tr><th>Name</th><th>E [${unit('stress')}]</th><th>ν</th><th>γ [${unit('weight')}]</th><th>α [${unit('alpha')}]</th></tr>${m.materials.map(x =>
     `<tr><td>${esc(x.name)}</td><td>${fsig(toU('stress', x.E))}</td><td>${x.nu ?? ''}</td><td>${fsig(toU('weight', x.gamma || 0))}</td><td>${toU('alpha', x.alpha || 0).toExponential(3)}</td></tr>`).join('')}</table>`;
   if (on('sections')) h += `<h3>Sections</h3><table><tr><th>Name</th><th class="l">Shape</th><th class="l">Dimensions [${unit('dim')}]</th><th>A [${unit('area')}]</th><th>I [${unit('inertia')}]</th></tr>${m.sections.map(x => {
