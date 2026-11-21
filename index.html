@@ -851,7 +851,7 @@ html, body { margin: 0; }
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 19L20 5"/><circle cx="4" cy="19" r="2.2" fill="currentColor"/><circle cx="20" cy="5" r="2.2" fill="currentColor"/></svg></button>
       <button class="tool" data-tool="member" data-variant="truss" data-name="Truss bar" data-key="T" title="Truss bar (T): members pinned at both ends, as in a truss (axial force only). Click node to node; Esc ends the chain">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5.96 17.29L18.04 6.71"/><circle cx="4" cy="19" r="2.6"/><circle cx="20" cy="5" r="2.6"/></svg></button>
-      <button class="tool" data-tool="member" data-variant="cable" data-name="Cable" data-key="C" title="Cable (C): a tension-only member, such as a rod brace: pinned at both ends, it pulls but goes slack instead of pushing. Click node to node; Esc ends the chain">
+      <button class="tool" data-tool="member" data-variant="cable" data-name="Rod / cable" data-key="C" title="Rod / cable (C): a tension-only member, such as a steel rod brace or a cable: pinned at both ends, it pulls but goes slack instead of pushing. Click node to node; Esc ends the chain">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5.9 17.3Q10.6 15.6 18.1 6.7" stroke-width="1.1"/><circle cx="4" cy="19" r="2.6"/><circle cx="20" cy="5" r="2.6"/></svg></button>
       </div>
       <button class="tool" data-tool="dim" title="Dimension line (D). Click two points, then where the line goes; H / V / A for horizontal, vertical, aligned">
@@ -1892,8 +1892,9 @@ if (IS_NODE && require.main === module) {
 
   // ---------- tension-only members (cables) ----------
   // A member with tensionOnly set (a cable, or a rod brace) pulls but cannot push. It is a straight bar pinned at
-  // both ends (whatever its hinge settings say), with axial deformation (whatever the model's setting), and no sag:
-  // a first-order model, as building programs use for rod bracing; it can be pretensioned (pretensionOf, below). It takes no load along its
+  // both ends (whatever its hinge settings say), with axial deformation (whatever the model's setting): a
+  // first-order model, as building programs use for rod bracing. It can be pretensioned (pretensionOf, below), and
+  // then its sag under its own weight makes it softer (sagOf, below). It takes no load along its
   // length: its own weight goes half to each end node, and any other load on it is refused, since a cable loaded
   // across its length would sag, which a straight bar cannot show.
   // What a cable carries depends on the loads, so results no longer add up: each load case or combination is
@@ -1987,8 +1988,12 @@ if (IS_NODE && require.main === module) {
       // the same, so its bending is negligible too.
       const rigid = !cable && !!mb.rigid, axialOn = cable || (!rigid && (mb.axial ?? !opts.axialRigid)), shearOn = !cable && !rigid && (mb.shear ?? !!opts.shear);
       const I = rigid ? I0 * AXIAL_RIGID : I0;
-      const E = mat.E * 1000, alpha = mat.alpha || 0;
-      const A = slack ? (cab.k > 0 ? cab.k * L / E : 0) : axialOn ? A0 : A0 * AXIAL_RIGID;
+      // a section can carry its own E (dims._E, MPa): a wire rope or strand, whose E is its own, not its steel's
+      const E = (sec.dims && sec.dims._E > 0 ? sec.dims._E : mat.E) * 1000, alpha = mat.alpha || 0;
+      // a sagging cable (cab.kt: member id -> stiffness) stands in as a straight one of that axial stiffness: the
+      // tangent to its curve of force against stretch at its present tension (see sagLine)
+      const kt = cable && cab && cab.kt ? cab.kt.get(mb.id) : undefined;
+      const A = slack ? (cab.k > 0 ? cab.k * L / E : 0) : kt > 0 ? kt * L / E : axialOn ? A0 : A0 * AXIAL_RIGID;
       // shear deformation (Timoshenko) when asked for: G from E and Poisson's ratio
       const G = E / (2 * (1 + (Number.isFinite(mat.nu) ? mat.nu : 0.3)));
       const GAs = shearOn && As > 0 ? G * As : Infinity, Phi = shearOn && As > 0 ? 12 * E * I / (GAs * L * L) : 0;
@@ -2046,7 +2051,7 @@ if (IS_NODE && require.main === module) {
         P[dofs[i]] -= fi;
         Pfe[dofs[i]] += fi;
       }
-      elems.push({ mb, a, b, L, c, s, E, A, I, A0, I0, rigid, axialOn, shearOn, h, As, G, Phi, alpha, k0, R0: R, rel, k, R: Rs, kth, Tc, ld, dofs, kg, cable, slack, pre, Npre });
+      elems.push({ mb, a, b, L, c, s, E, A, I, A0, I0, rigid, axialOn, shearOn, h, As, G, Phi, alpha, k0, R0: R, rel, k, R: Rs, kth, Tc, ld, dofs, kg, cable, slack, pre, Npre, kt });
     }
 
     // nodal loads and prescribed displacements
@@ -2227,7 +2232,8 @@ if (IS_NODE && require.main === module) {
       const fg = [c * f[0] - s * f[1], s * f[0] + c * f[1], f[2], c * f[3] - s * f[4], s * f[3] + c * f[4], f[5]];
       for (let i = 0; i < 3; i++) { reactions[el.a][i] += fg[i]; reactions[el.b][i] += fg[3 + i]; }
       const mr = { id: el.mb.id, i: el.mb.i, j: el.mb.j, L: el.L, c, s, f, dl, EI: el.E * el.I, EA: el.E * el.A, GAs: el.Phi > 0 ? el.G * el.As : Infinity, kth: el.kth, Tc: el.Tc, alpha: el.alpha, ld: el.ld };
-      if (el.cable) { mr.cable = true; mr.kc = el.E * el.A0 / el.L; if (el.pre) mr.pre = el.pre; } // a cable, its axial stiffness EA/L when taut, and its shortening
+      // a cable, its axial stiffness when taut (EA/L, or a sagging one's tangent), and its shortening
+      if (el.cable) { mr.cable = true; mr.kc = el.kt > 0 ? el.kt : el.E * el.A0 / el.L; if (el.pre) mr.pre = el.pre; }
       return mr;
     });
     nodes.forEach((n, i) => { for (let d = 0; d < 3; d++) reactions[i][d] -= Pnodal[i * 3 + d]; });
@@ -2276,28 +2282,30 @@ if (IS_NODE && require.main === module) {
   // cable takes in the limit: positive, the swing would pull it taut; negative, the loads need it to push (pushers);
   // zero, nothing pushes that way, and the finite part δ0 decides. A pretensioned cable (pre: its shortening e) is
   // taut once its ends are less than e closer together: it would carry EA/L·(δ + e).
-  function cableState(model, loads, factors, opts, slack, kRef, pre = null) {
-    const T = new Map(), pushers = [];
+  // kt: the sagging cables' stiffness (as in analyzeOnce). D: how much each cable's ends move apart.
+  function cableState(model, loads, factors, opts, slack, kRef, pre = null, kt = null) {
+    const T = new Map(), D = new Map(), pushers = [];
     // the scale of the forces: 1e-9 of the largest end force of a working member (and a floor of 1e-12 kN)
     const tolOf = r => { let F = 0; for (const mr of r.members) if (!slack.has(mr.id)) for (const d of [0, 1, 3, 4]) F = Math.max(F, Math.abs(mr.f[d])); return 1e-9 * F + 1e-12; };
     let r = null;
-    try { r = analyzeOnce(model, loads, factors, opts, { slack, k: 0, check: false, pre }); } catch (e) { if (!e.mechanism || !slack.size) throw e; }
+    try { r = analyzeOnce(model, loads, factors, opts, { slack, k: 0, check: false, pre, kt }); } catch (e) { if (!e.mechanism || !slack.size) throw e; }
     if (r) {
-      for (const mr of r.members) if (mr.cable) T.set(mr.id, slack.has(mr.id) ? mr.kc * (mr.dl[3] - mr.dl[0] + (mr.pre || 0)) : mr.f[3]);
-      return { T, tol: tolOf(r), stable: true, pushers, kRef: r.kRef };
+      for (const mr of r.members) if (mr.cable) { const d = mr.dl[3] - mr.dl[0]; D.set(mr.id, d); T.set(mr.id, slack.has(mr.id) ? mr.kc * (d + (mr.pre || 0)) : mr.f[3]); }
+      return { T, D, tol: tolOf(r), stable: true, pushers, kRef: r.kRef };
     }
     const [e1, e2] = SLACK_K;
-    const r1 = analyzeOnce(model, loads, factors, opts, { slack, k: e1 * kRef, check: false, pre });
-    const r2 = analyzeOnce(model, loads, factors, opts, { slack, k: e2 * kRef, check: false, pre });
+    const r1 = analyzeOnce(model, loads, factors, opts, { slack, k: e1 * kRef, check: false, pre, kt });
+    const r2 = analyzeOnce(model, loads, factors, opts, { slack, k: e2 * kRef, check: false, pre, kt });
     const tol = tolOf(r2);
     r2.members.forEach((mr, n) => {
       if (!mr.cable) return;
-      if (!slack.has(mr.id)) { T.set(mr.id, mr.f[3]); return; }
+      if (!slack.has(mr.id)) { T.set(mr.id, mr.f[3]); D.set(mr.id, mr.dl[3] - mr.dl[0]); return; }
       const m1 = r1.members[n], d1 = m1.dl[3] - m1.dl[0], d2 = mr.dl[3] - mr.dl[0];
       const m = (d2 - d1) * e1 * e2 / (e1 - e2), B = kRef * m;
+      D.set(mr.id, d1 - m / e1); // (the finite part)
       if (Math.abs(B) > tol) { T.set(mr.id, B); if (B < 0) pushers.push({ id: mr.id, B }); } else T.set(mr.id, mr.kc * (d1 - m / e1 + (mr.pre || 0)));
     });
-    return { T, tol, stable: false, pushers, kRef };
+    return { T, D, tol, stable: false, pushers, kRef };
   }
 
   // ---------- pretension ----------
@@ -2379,6 +2387,62 @@ if (IS_NODE && require.main === module) {
     }
     return x;
   }
+  // ---------- sag ----------
+  // A cable hangs in a shallow curve under its own weight, so pulling it first straightens the curve and then
+  // stretches the steel: the two act one after the other, and the cable is softer than EA/L, the more so the less
+  // tight it is. For a shallow (parabolic) curve, how far apart its ends are, measured from where the cable would be
+  // straight and unstressed, is x = T·L/EA − c/T² at tension T, with c = (w·cos α)²·L³/24 (w·cos α: its weight across
+  // its length, α its slope). The slope of that curve gives the stiffness at T: EA/L ÷ (1 + (w·L·cos α)²·EA/(12·T³)),
+  // Ernst's formula, as in STAAD's linearized cable, here at the tension the cable has under the loads, not only its
+  // installed one. Below T = w·L·cos α (a sag of more than an eighth of its length, where a parabola no longer does)
+  // the cable goes on along the tangent there, down to slack: what it carries then is less than its own weight.
+  // It counts for the cables with a pretension: the sag depends on how tight a cable was installed, which only the
+  // pretension says. One without is taken as straight and just taut, as before. A cable with no weight (its material
+  // weighs nothing) or that hangs straight down has no sag.
+  // Each cable: { L, f: L/EA, c, Ts: w·L·cos α, ks: the stiffness at Ts, w: w·cos α (kN/m), T0: its pretension with no
+  // load, e: its shortening (x = δ + e, δ how far its ends have moved apart) }; null with none.
+  function sagOf(model, pt) {
+    if (!pt) return null;
+    const nodes = new Map(model.nodes.map(n => [n.id, n])), mats = new Map(model.materials.map(m => [m.id, m])), secs = new Map(model.sections.map(x => [x.id, x]));
+    const out = new Map();
+    pt.ids.forEach((id, k) => {
+      const T0 = pt.got[k];
+      if (!(T0 > 1e-6 * pt.asked[k])) return; // it could not be pretensioned: straight
+      const mb = model.members.find(m => m.id === id), mat = mats.get(mb.material), sec = secs.get(mb.section);
+      const n1 = nodes.get(mb.i), n2 = nodes.get(mb.j), L = Math.hypot(n2.x - n1.x, n2.y - n1.y);
+      const A0 = sectionProps(sec).A, E = (sec.dims && sec.dims._E > 0 ? sec.dims._E : mat.E) * 1000;
+      const w = (mat.gamma || 0) * A0 * Math.abs(n2.x - n1.x) / L;
+      if (!(w > 1e-12 * (mat.gamma || 0) * A0)) return;
+      const f = L / (E * A0), c = w * w * L ** 3 / 24, Ts = w * L;
+      const sc = { L, f, c, Ts, ks: 1 / (f + 2 * c / Ts ** 3), w, T0 };
+      // with no load it carries T0, where a straight cable shortened by pt.e (worked out without the sag) would:
+      // the same distance between its ends, so x(T0) − e = f·T0 − pt.e
+      sc.e = pt.e.get(id) + sagX(sc, T0) - f * T0;
+      out.set(id, sc);
+    });
+    return out.size ? out : null;
+  }
+  // how far apart a sagging cable's ends are at tension T (from where it would be straight and unstressed)
+  const sagX = (s, T) => (T >= s.Ts ? s.f * T - s.c / T ** 2 : s.f * s.Ts - s.c / s.Ts ** 2 - (s.Ts - T) / s.ks);
+  // its tension when its ends are x apart (0: slack)
+  function sagT(s, x) {
+    const xs = sagX(s, s.Ts);
+    if (x <= xs) return Math.max(0, s.Ts + s.ks * (x - xs));
+    // f·T − c/T² = x: it rises and curves down, so Newton's method started below the answer (Ts, or where a
+    // straight cable would be) climbs straight to it
+    let t = Math.max(s.Ts, x / s.f);
+    for (let i = 0; i < 200; i++) { const step = (x - s.f * t + s.c / t ** 2) / (s.f + 2 * s.c / t ** 3); t += step; if (step <= 1e-15 * t) break; }
+    return t;
+  }
+  // its stiffness at tension T (the slope of the curve; Ernst's formula)
+  const sagK = (s, T) => (T >= s.Ts ? 1 / (s.f + 2 * s.c / T ** 3) : s.ks);
+  // the straight cable that touches the curve at tension t: stiffness k, and the shortening p by which it pulls
+  // k·(δ + p) (at Ts or above: below, the curve is that straight line)
+  function sagLine(s, t) {
+    const T = Math.max(t, s.Ts), k = sagK(s, T);
+    return { k, p: T / k - sagX(s, T) + s.e };
+  }
+
   // The analysis. With cables (members with tensionOnly), it is repeated: every cable starts taut; a taut one in
   // compression goes slack, and a slack one whose ends would move apart (it would be in tension) is taut again;
   // until nothing changes. Then each cable is in tension or slack, and the results are those of the last analysis,
@@ -2389,7 +2453,8 @@ if (IS_NODE && require.main === module) {
   // an influence line): the cables are taken as ordinary pinned bars, all working, without pretension (r.cablesLinear).
   // The results carry slack: the ids of the slack cables ([] with none), cableRounds: how many rounds it took, and
   // pretension (with pretensioned cables): { ids, asked, got (kN, with no load), short (the ids that could not get
-  // theirs), e (Map: id -> shortening, m) }.
+  // theirs), e (Map: id -> shortening, m) }. Pretensioned cables sag under their own weight (sagOf, above) unless
+  // opts.cableSag is false; then each one's result has sag (see the end) and r.sagRounds says how many rounds it took.
   function analyze(model, loads, factors, opts = {}) {
     const cables = model.members.filter(mb => mb.tensionOnly).map(mb => mb.id);
     if (!cables.length || opts.cablesLinear || opts.cache) {
@@ -2399,42 +2464,88 @@ if (IS_NODE && require.main === module) {
       return r;
     }
     const pt = pretensionOf(model, opts), pre = pt ? pt.e : null;
-    const quiet = { ...opts, trace: false }, slack = new Set(), seen = new Set(['']), most = 3 * cables.length + 30;
+    const sag = opts.cableSag === false ? null : sagOf(model, pt);
+    const quiet = { ...opts, trace: false };
     const list = ids => (ids.length === 1 ? `member ${ids[0]}` : `members ${ids.slice(0, -1).join(', ')} and ${ids[ids.length - 1]}`);
-    let single = false, rounds = 0, kRef = 0, state;
-    for (;;) {
-      state = cableState(model, loads, factors, quiet, slack, kRef, pre);
-      rounds++;
-      if (!kRef) kRef = state.kRef;
-      const flips = [];
-      for (const id of cables) {
-        const t = state.T.get(id);
-        if (slack.has(id) ? t > state.tol : t < -state.tol) flips.push({ id, by: Math.abs(t) });
+    let rounds = 0, kRef = 0;
+    // which cables are slack, with these shortenings (pre) and sagging cables' stiffnesses (kt)
+    const settle = (pre, kt) => {
+      const slack = new Set(), seen = new Set(['']), most = 3 * cables.length + 30;
+      let single = false, n = 0, state;
+      for (;;) {
+        state = cableState(model, loads, factors, quiet, slack, kRef, pre, kt);
+        n++; rounds++;
+        if (!kRef) kRef = state.kRef;
+        const flips = [];
+        for (const id of cables) {
+          const t = state.T.get(id);
+          if (slack.has(id) ? t > state.tol : t < -state.tol) flips.push({ id, by: Math.abs(t) });
+        }
+        if (!flips.length) break;
+        const settleErr = () => {
+          const ids = flips.map(f => f.id).sort((p, q) => p - q);
+          const err = new Error(`The cables (tension-only members) do not settle: ${list(ids)} keep${ids.length === 1 ? 's' : ''} going taut and slack from one analysis to the next. Untick Tension only for one of them, or brace the structure another way.`);
+          err.members = ids;
+          return err;
+        };
+        if (n >= most) throw settleErr();
+        for (const { id } of single ? [flips.reduce((p, q) => (q.by > p.by ? q : p))] : flips) { if (slack.has(id)) slack.delete(id); else slack.add(id); }
+        const key = [...slack].sort((p, q) => p - q).join(',');
+        if (seen.has(key)) { if (single) throw settleErr(); single = true; seen.clear(); }
+        seen.add(key);
       }
-      if (!flips.length) break;
-      const settle = () => {
-        const ids = flips.map(f => f.id).sort((p, q) => p - q);
-        const err = new Error(`The cables (tension-only members) do not settle: ${list(ids)} keep${ids.length === 1 ? 's' : ''} going taut and slack from one analysis to the next. Untick Tension only for one of them, or brace the structure another way.`);
+      if (state.pushers.length) {
+        const ids = state.pushers.sort((p, q) => p.B - q.B).map(p => p.id), one = ids.length === 1;
+        const err = new Error(`Under these loads the structure needs ${list(ids)} to push, but ${one ? 'it is a cable' : 'they are cables'} (tension only): with ${one ? 'it' : 'them'} slack, nothing holds the structure that way. Add a cable or brace the other way (an X), or untick Tension only.`);
         err.members = ids;
-        return err;
-      };
-      if (rounds >= most) throw settle();
-      for (const { id } of single ? [flips.reduce((p, q) => (q.by > p.by ? q : p))] : flips) { if (slack.has(id)) slack.delete(id); else slack.add(id); }
-      const key = [...slack].sort((p, q) => p - q).join(',');
-      if (seen.has(key)) { if (single) throw settle(); single = true; seen.clear(); }
-      seen.add(key);
+        throw err;
+      }
+      return { slack, state };
+    };
+    // Sagging cables (sag, above): each round takes each one as the straight cable that touches its curve at its
+    // tension so far (from its pretension, to start), finds which cables are slack, and reads off how far each one's
+    // ends have moved apart, which its curve turns into a new tension (Newton's method), until the tensions settle.
+    let pk = pre, kt = null, res, sagRounds = 0;
+    if (!sag) res = settle(pre, null);
+    else {
+      let T = new Map([...sag].map(([id, sc]) => [id, sc.T0]));
+      for (;;) {
+        kt = new Map(); pk = new Map(pre);
+        for (const [id, sc] of sag) { const l = sagLine(sc, T.get(id)); kt.set(id, l.k); pk.set(id, l.p); }
+        res = settle(pk, kt);
+        sagRounds++;
+        let moved = 0, big = 0;
+        const next = new Map();
+        for (const [id, sc] of sag) {
+          const t = sagT(sc, res.state.D.get(id) + sc.e);
+          next.set(id, t);
+          moved = Math.max(moved, Math.abs(t - T.get(id))); big = Math.max(big, t, sc.T0);
+        }
+        T = next;
+        if (moved <= 1e-10 * big + 1e-12) break;
+        if (sagRounds >= 100) {
+          const ids = [...sag.keys()];
+          throw new Error(`The sag of the cables does not settle: the tension in ${list(ids)} keeps changing from one analysis to the next. Turn off Settings ▸ Cable sag, or give ${ids.length === 1 ? 'it' : 'them'} more pretension.`);
+        }
+      }
     }
-    if (state.pushers.length) {
-      const ids = state.pushers.sort((p, q) => p.B - q.B).map(p => p.id), one = ids.length === 1;
-      const err = new Error(`Under these loads the structure needs ${list(ids)} to push, but ${one ? 'it is a cable' : 'they are cables'} (tension only): with ${one ? 'it' : 'them'} slack, nothing holds the structure that way. Add a cable or brace the other way (an X), or untick Tension only.`);
-      err.members = ids;
-      throw err;
-    }
-    const r = analyzeOnce(model, loads, factors, opts, { slack, k: state.stable ? 0 : SLACK_K[1] * kRef, check: true, pre });
+    const { slack, state } = res;
+    const r = analyzeOnce(model, loads, factors, opts, { slack, k: state.stable ? 0 : SLACK_K[1] * kRef, check: true, pre: pk, kt });
     for (const mr of r.members) if (slack.has(mr.id)) mr.f = [0, 0, 0, 0, 0, 0];
     r.slack = [...slack].sort((p, q) => p - q);
     r.cableRounds = rounds;
     if (pt) r.pretension = pt;
+    // each sagging cable: its tension T, its stiffness k there (Ernst) against EA/L straight (kEA), the weight across
+    // it w (kN/m), its sag at mid-length w·L²/(8T) (from the chord; deep: past an eighth of its length)
+    if (sag) {
+      r.sagRounds = sagRounds;
+      for (const mr of r.members) {
+        const sc = sag.get(mr.id);
+        if (!sc) continue;
+        const T = Math.max(0, mr.f[3]);
+        mr.sag = { T, k: T > 0 ? sagK(sc, T) : 0, kEA: 1 / sc.f, w: sc.w, d: T > 0 ? sc.w * sc.L ** 2 / (8 * T) : Infinity, deep: T < sc.Ts, T0: sc.T0 };
+      }
+    }
     return r;
   }
 
@@ -3064,6 +3175,7 @@ if (IS_NODE && require.main === module) {
 //   (E3, with E7 effective widths for slender elements), flexure (F2 yielding and lateral-torsional buckling, F3
 //   flange local buckling), shear (G2.1) and combined force and bending (H1.1), LRFD or ASD.
 //   AISC 360-22 checks of steel rods in tension (cables with a round solid section): yielding (D2) and the threads (J3).
+//   Structural strand (ASTM A586) and wire rope (A603) tables, for the analysis (no strength check).
 // Units: section dimensions in mm, E and Fy in MPa, lengths in m, forces in kN and moments in kN·m.
 (function (root) {
   // ---------- ASCE 7-22 load combinations ----------
@@ -3296,6 +3408,29 @@ if (IS_NODE && require.main === module) {
       cap, worst, ratio: worst.N / cap, governs: byThreads ? 'threads' : 'yielding' };
   }
 
+  // ---------- structural strand and wire rope (a cable with a rope section) ----------
+  // The tables: ASTM A586 structural strand (Grade 1, Class A coating throughout) and ASTM A603 structural wire rope
+  // (Class A coating throughout), by nominal diameter (in): approximate gross metallic area (in²) and minimum breaking
+  // force (tons of 2000 lb), as Lexco Cable's catalog lists them. E, prestretched: 24,000 ksi for strand (to 2-9/16 in;
+  // AISC Steel Bridge Design Handbook, ch. 1) and 20,000 ksi for rope (as suppliers give it). No strength check: the
+  // factor on the breaking force is set by whatever governs the work (a building, falsework, rigging), so the app shows
+  // the minimum breaking force for the engineer to check against.
+  const TON = 2000 * 0.0044482216152605; // kN in a ton of 2000 lb
+  const ROPES = {
+    A586: { name: 'Structural strand (ASTM A586)', short: 'strand', E: 24000, rows: [
+      ['1/2', 0.5, 0.150, 15.0], ['9/16', 0.5625, 0.190, 19.0], ['5/8', 0.625, 0.234, 24.0], ['11/16', 0.6875, 0.284, 29.0], ['3/4', 0.75, 0.338, 34.0],
+      ['13/16', 0.8125, 0.396, 40.0], ['7/8', 0.875, 0.459, 46.0], ['15/16', 0.9375, 0.527, 54.0], ['1', 1, 0.600, 61.0], ['1-1/8', 1.125, 0.759, 78.0],
+      ['1-1/4', 1.25, 0.938, 96.0], ['1-3/8', 1.375, 1.130, 116.0], ['1-1/2', 1.5, 1.350, 138.0], ['1-5/8', 1.625, 1.590, 162.0], ['1-3/4', 1.75, 1.840, 188.0],
+      ['1-7/8', 1.875, 2.110, 216.0], ['2', 2, 2.400, 245.0]] },
+    A603: { name: 'Structural wire rope (ASTM A603)', short: 'rope', E: 20000, rows: [
+      ['3/8', 0.375, 0.065, 6.5], ['7/16', 0.4375, 0.091, 8.8], ['1/2', 0.5, 0.119, 11.5], ['9/16', 0.5625, 0.147, 14.5], ['5/8', 0.625, 0.182, 18],
+      ['11/16', 0.6875, 0.221, 21.5], ['3/4', 0.75, 0.268, 26], ['13/16', 0.8125, 0.311, 30], ['7/8', 0.875, 0.361, 35], ['15/16', 0.9375, 0.414, 40],
+      ['1', 1, 0.471, 45.7], ['1-1/8', 1.125, 0.596, 57.8], ['1-1/4', 1.25, 0.745, 72.2], ['1-3/8', 1.375, 0.906, 87.8], ['1-1/2', 1.5, 1.076, 104],
+      ['1-5/8', 1.625, 1.27, 123], ['1-3/4', 1.75, 1.47, 143], ['1-7/8', 1.875, 1.69, 164], ['2', 2, 1.92, 186]] },
+  };
+  // a table row in the app's units: { family, name, d (mm), A (mm²), E (MPa), mbf (kN), tons }
+  const ropeRow = (family, r) => ({ family, name: `${r[0]} in ${ROPES[family].short}`, d: r[1] * 25.4, A: r[2] * 645.16, E: ROPES[family].E * KSI, mbf: r[3] * TON, tons: r[3] });
+
   // ---------- NDS 2018 wood members (rectangular sections) ----------
   // Reference design values (psi) of the wood grades the Materials tab starts from: NDS Supplement Table 4A
   // (visually graded dimension lumber, 2 to 4 in thick), Table 4B (Southern Pine, whose values are given by width,
@@ -3430,7 +3565,7 @@ if (IS_NODE && require.main === module) {
   }
 
   const api = { LOAD_TYPES, guessLoadType, asce7Combos, iShapeProps, compression, flexure, shear, cbOf, momentAt, checkSteelMember,
-    ROD_GRADES, rodGradeOf, checkRodMember,
+    ROD_GRADES, rodGradeOf, checkRodMember, ROPES, ropeRow,
     PSI, NDS_GRADES, LRFD_F, ndsGradeValues, nominalIn, sizeFactor, flatUse, beamLe, checkWoodMember };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Design = api;
@@ -6375,9 +6510,12 @@ const editCaseId = () => (typeof st.activeCase === 'number' ? st.activeCase : st
 
 /* ---------------- undo / persistence ---------------- */
 function snapshot() { return JSON.stringify(st.model); }
+// The undo stack keeps the last UNDO_MAX steps, whatever adds one (a change, a redo, the end of a drag): trimmed at
+// every push, since a push that did not trim (a redo, a drag) once let it pass the limit and grow from then on
+const UNDO_MAX = 200;
+function pushUndo(s) { st.undo.push(s); while (st.undo.length > UNDO_MAX) st.undo.shift(); }
 function commit(fn) {
-  st.undo.push(snapshot());
-  if (st.undo.length > 200) st.undo.shift();
+  pushUndo(snapshot());
   st.redo = [];
   fn();
   changed();
@@ -6393,7 +6531,7 @@ function redo() {
   st.xcmd = null;
   if (!st.redo.length) return;
   const what = describeChange(st.model, JSON.parse(st.redo[st.redo.length - 1]));
-  st.undo.push(snapshot()); st.model = JSON.parse(st.redo.pop()); cleanSel(); changed();
+  pushUndo(snapshot()); st.model = JSON.parse(st.redo.pop()); cleanSel(); changed();
   flash(`Redone: ${what}.`);
 }
 // What changed from model a to model b, in a few words, for the undo and redo buttons ("add member 5", "move
@@ -6447,7 +6585,7 @@ function describeChange(a, b) {
     if (ch.length) parts.push(ch.length === 1 && ch[0].name ? `edit ${word} ${ch[0].name}` : `edit ${ch.length === 1 ? 'a ' + word : ch.length + ' ' + word + 's'}`);
   }
   if (a.title !== b.title) parts.push('rename the model');
-  for (const [k, w] of [['shearDef', 'shear deformation'], ['axialRigid', 'axially rigid members'], ['envExclude', 'envelope choices'], ['design', 'steel check settings']]) if (!same(a[k], b[k])) parts.push(w);
+  for (const [k, w] of [['shearDef', 'shear deformation'], ['axialRigid', 'axially rigid members'], ['cableStraight', 'cable sag'], ['envExclude', 'envelope choices'], ['design', 'steel check settings']]) if (!same(a[k], b[k])) parts.push(w);
   if (!parts.length) return 'the last edit';
   return parts.slice(0, 2).join(', ') + (parts.length > 2 ? ' …' : '');
 }
@@ -6542,7 +6680,8 @@ function solverModel(m = st.model) {
 }
 function dimsToMetres(s) {
   const d = s.dims, out = {};
-  if (s.type === 'generic') return { A: d.A * 1e-6, I: d.I * 1e-12, h: d.h * 1e-3 };
+  // (a wire rope or strand from the table: its own E, which the solver uses for the member instead of the material's)
+  if (s.type === 'generic') return { A: d.A * 1e-6, I: d.I * 1e-12, h: d.h * 1e-3, ...(s.cat && s.cat.rope && s.cat.rope.E > 0 ? { _E: s.cat.rope.E } : {}) };
   for (const k in d) out[k] = d[k] / 1000;
   // a section from the AISC table: its published A and Ix (with the root fillets) are the ones analysed
   if (s.cat && s.cat.A > 0 && s.cat.Ix > 0) { out._A = s.cat.A * 1e-6; out._I = s.cat.Ix * 1e-12; }
@@ -6617,6 +6756,14 @@ function pretensionNote(mbs, m = st.model) {
   }
   return out.join('');
 }
+// a sagging cable's result in words (mr.sag from the analysis), after the cable's name
+function sagWords(sg) {
+  if (!(sg.T > 0)) return 'is slack';
+  if (sg.deep) return `carries only ${fq('force', sg.T)}: it sags more than an eighth of its length, all but slack`;
+  // (the sag in plain figures, whatever format displacements are shown in: it is a size, not a result to compare)
+  const d = fmt(toU('disp', sg.d), { mm: 0, cm: 1, in: 2, ft: 3, m: 3 }[unitRow('disp')[0]] ?? 2);
+  return `sags ${d} ${unit('disp')} at mid-length at ${fq('force', sg.T)}, ${Math.round(100 * sg.k / sg.kEA)}% as stiff as straight`;
+}
 // analysis of one load case or combination; throws when the structure cannot be analysed
 // (m: another model to analyse, such as the beam solver's copy; by default the model itself)
 function analyzeFor(active, opts, m = st.model) {
@@ -6624,8 +6771,8 @@ function analyzeFor(active, opts, m = st.model) {
     node: (c, id) => { const L = m.loads[c]; return L && L.nodes[id]; },
     member: (c, id) => memberLoadsFor(m, c, id),
   };
-  // shear deformation (Timoshenko members) is a setting of the model, saved with it
-  const r = FrameSolver.analyze(solverModel(m), loads, factorsFor(active, m), { ...opts, shear: !!m.shearDef, axialRigid: !!m.axialRigid, caseNames: caseNamesOf(m) });
+  // shear deformation (Timoshenko members), axially rigid members and cable sag are settings of the model, saved with it
+  const r = FrameSolver.analyze(solverModel(m), loads, factorsFor(active, m), { ...opts, shear: !!m.shearDef, axialRigid: !!m.axialRigid, cableSag: !m.cableStraight, caseNames: caseNamesOf(m) });
   // extra stations at point loads and partial-load ends of every case, so all cases share positions
   const breaks = id => FrameSolver.loadBreaks(Object.values(m.loads).map(L => L.members[id]));
   r.stations = new Map(r.members.map(mr => [mr.id, FrameSolver.memberStations(mr, 40, breaks(mr.id))]));
@@ -6774,7 +6921,7 @@ function solveInBackground() {
   if (!w) return false;
   const env = isEnv(st.activeCase);
   const runs = env ? envelopeRuns(st.activeCase).map(r => ({ key: r.key, name: r.name, factors: factorsFor(r.key) })) : [{ key: st.activeCase, factors: factorsFor(st.activeCase) }];
-  const job = { model: solverModel(m), loads: m.loads, swCases: m.cases.filter(c => c.selfWeight).map(c => c.id), runs, opts: { shear: !!m.shearDef, axialRigid: !!m.axialRigid, caseNames: caseNamesOf(m) } };
+  const job = { model: solverModel(m), loads: m.loads, swCases: m.cases.filter(c => c.selfWeight).map(c => c.id), runs, opts: { shear: !!m.shearDef, axialRigid: !!m.axialRigid, cableSag: !m.cableStraight, caseNames: caseNamesOf(m) } };
   // with Scale on, the worker then solves every case too, for the largest reaction (reactionMaxima)
   const scaled = arrowSettings().prop;
   if (scaled) job.reactCases = m.cases.map(c => c.id);
@@ -9037,7 +9184,7 @@ function render(cursorOnly = false) {
       else if (dirShown) why = (why.match(/, to (.*)$/) || ['', ''])[1]; // only "member 4" (where it ends)
       if (why && dirShown) why = `to ${why}`;
       const splits = (t => (t && t.mb ? `splits member ${t.mb.id}` : ''))(typedEnd ? pointTarget(...tw) : liveAimTarget());
-      const notes = [{ truss: 'truss bar: pinned ends', cable: 'cable: tension only' }[memberVariant()] || '', why, splits].filter(Boolean).join(' · ');
+      const notes = [{ truss: 'truss bar: pinned ends', cable: 'rod / cable: tension only' }[memberVariant()] || '', why, splits].filter(Boolean).join(' · ');
       const box = memberBoxes(e, L, ang);
       if (st.typed || L > 1e-9) inputBoxes(g, tx, ty, box.fields, [notes, box.hint].filter(Boolean), C, !!box.bad, [tx - ax, ty - ay]); // past the end
     }
@@ -9625,7 +9772,7 @@ function placeTypedNode() {
 // (pinned at both ends, tension only): three buttons in the toolbar's Members group, B, T and C. Which one is kept
 // with the tool's settings (memberPinned, memberCable).
 const memberVariant = () => st.memberVariant || (loadDefaults().memberCable ? 'cable' : loadDefaults().memberPinned ? 'truss' : 'frame');
-const MEMBER_KINDS = { frame: 'Frame bar', truss: 'Truss bar', cable: 'Cable' };
+const MEMBER_KINDS = { frame: 'Frame bar', truss: 'Truss bar', cable: 'Rod / cable' };
 function setMemberVariant(v) {
   if (v !== memberVariant()) { // remembered in this browser
     setToolValue('memberPinned', v === 'truss' ? true : undefined);
@@ -11897,6 +12044,7 @@ function updateReadout(px, py) {
     ro.textContent = head + [row('N', 'force'), row('V', 'force'), row('M', 'moment')].join('\n') + `\nunits ${unit('force')}, ${unit('moment')}`;
   } else ro.textContent = head + (st.results.slack && st.results.slack.includes(hm.mb.id) ? `slack: a cable these loads would push${hm.mb.pretension > 0 ? ', past its pretension' : ''}\n` : '') +
     (hm.mb.tensionOnly && hm.mb.pretension > 0 ? `pretension T₀ = ${fq('force', hm.mb.pretension)} (with no load)\n` : '') +
+    (() => { const sg = (st.results.members.find(x => x.id === hm.mb.id) || {}).sag; return sg ? `the cable ${sagWords(sg)}\n` : ''; })() +
     `N = ${fmt(toU('force', lerp('N')))} ${unit('force')}\nV = ${fmt(toU('force', (displayOpts().flipV ? -1 : 1) * lerp('V')))} ${unit('force')}\n` +
     `M = ${fmt(toU('moment', shownM(lerp('M'))))} ${unit('moment')}\nδ = ${fdisp(Math.hypot(lerp('u'), lerp('v')))} ${unit('disp')}` +
     // with the deformed shape shown: every part of the movement, and the rotation
@@ -12258,12 +12406,12 @@ svg.addEventListener('pointerup', e => {
   if (d && d.kind === 'load' && d.placed) {
     // placed (and maybe slid): one undo step, and replace a point load already at the final spot
     mergePlacedPoint(d);
-    st.undo.push(d.before); st.redo = [];
+    pushUndo(d.before); st.redo = [];
     changed(); return;
   }
   if (d && (d.kind === 'move' || d.kind === 'dim' || d.kind === 'load') && d.moved) {
     if (d.attach) attachNode(d.id, d.attach);
-    st.undo.push(d.before); st.redo = [];
+    pushUndo(d.before); st.redo = [];
     changed();
   } else if (d && d.kind === 'move' && d.collapse) {
     // a plain click on an item of a multi-selection selects just that item
@@ -12656,7 +12804,7 @@ function closeCtxMenu() { if (st.ctxMenu) { st.ctxMenu.remove(); st.ctxMenu = nu
 function menuPlaceLoad(tool, sx, sy) {
   placeLoad(tool, sx, sy);
   const d = st.drag;
-  if (d && d.kind === 'load' && d.placed) { st.drag = null; mergePlacedPoint(d); st.undo.push(d.before); st.redo = []; changed(); }
+  if (d && d.kind === 'load' && d.placed) { st.drag = null; mergePlacedPoint(d); pushUndo(d.before); st.redo = []; changed(); }
 }
 function openCtxMenu(px, py, cx, cy) {
   closeCtxMenu(); closeToolFly();
@@ -12719,7 +12867,7 @@ function openCtxMenu(px, py, cx, cy) {
     if (cable) item('Make it a truss bar (it can push too)', () => commit(() => { delete mb.tensionOnly; }));
     else {
       item(pinned ? 'Make both ends rigid' : 'Pin both ends (truss member)', () => commit(() => { mb.hingeI = !pinned; mb.hingeJ = !pinned; }));
-      if (!loadedAlongIn(mb).length) item('Make it a cable (tension only)', () => commit(() => { mb.tensionOnly = true; }));
+      if (!loadedAlongIn(mb).length) item('Make it a rod / cable (tension only)', () => commit(() => { mb.tensionOnly = true; }));
       sep();
       item('Add a point load here', () => menuPlaceLoad('force', sx, sy));
       item('Add a distributed load', () => finishDistLoad({ mb: mb.id, a: 0, b: 0, moved: false }), { note: 'whole member' });
@@ -13046,7 +13194,7 @@ function panelProps() {
   if (!nodes.length && !mbs.length && dms.length) return panelDims(dms);
   if (!nodes.length && !mbs.length) {
     return `<h3>Getting started</h3>
-      <p class="hint"><b>Draw:</b> pick Frame bar (B, joined rigidly), Truss bar (T, pinned at both ends) or Cable (C, tension only) from the Members group and click from point to point; Esc ends a chain. Clicking on an existing member splits it there.
+      <p class="hint"><b>Draw:</b> pick Frame bar (B, joined rigidly), Truss bar (T, pinned at both ends) or Rod / cable (C, tension only) from the Members group and click from point to point; Esc ends a chain. Clicking on an existing member splits it there.
       The length and angle show next to the cursor. For an exact length, type it (for example 12.5) and press Enter or click: the node is placed that far toward the cursor, where the preview shows it.
       Add an angle with Tab or &lt; (12.5&lt;30, counterclockwise from horizontal; Tab switches back and forth between the length and the angle) or a slope (12.5&lt;4:12, the way the cursor points), or type Δx, Δy (12, 4). A direction on its own (&lt;30 or 4:12) and Enter locks it: click along it, or type a length.</p>
       <p class="hint"><b>Dimension:</b> pick the dimension tool (D), click two points, then click where the line goes. Press H, V or A while placing it for a horizontal, vertical or aligned dimension. Dimensions on nodes follow them when they move.</p>
@@ -13119,14 +13267,15 @@ function panelProps() {
       <label class="chk"${cab ? ' title="A cable is always pinned at both ends"' : ''}><input type="checkbox" id="m-hi" ${mb.hingeI || cab ? 'checked' : ''} ${cab ? 'disabled' : ''}> Hinge at start</label>
       <label class="chk"${cab ? ' title="A cable is always pinned at both ends"' : ''}><input type="checkbox" id="m-hj" ${mb.hingeJ || cab ? 'checked' : ''} ${cab ? 'disabled' : ''}> Hinge at end</label>
     </div>
-    <div class="box" data-box="cable"><h3>Cable</h3>
+    <div class="box" data-box="cable"><h3>Rod / cable</h3>
       <div class="row"><label class="chk" title="A cable or rod brace: it pulls, but goes slack instead of pushing"><input type="checkbox" id="m-cable" ${cab ? 'checked' : ''}> Tension only (a cable or rod)${someCab && !cab ? ' <span class="hint">(some)</span>' : ''}</label></div>
       <p class="hint">${someCab ? `It pulls, and goes slack (no force) where the loads would push it, as rod bracing does. Each load case and combination is analysed on its own until every cable is taut or slack. Pinned at both ends, straight: no sag. Its own weight goes half to each end; other loads go on its nodes.${cab ? '' : ' The settings below leave cables out.'}`
         : 'Tick for a member that can only pull, such as a cable or a rod brace (no load along it).'}</p>
       ${cab ? (() => { // pretension: the force it is tightened to, before any load
         const same = mbs.every(x => (x.pretension || 0) === (mb.pretension || 0));
-        return `<div class="fields"><label for="m-pre" title="The force the cable is tightened to (turnbuckle, gauge) before any load: with no load on the structure it carries this. Blank or 0: none.">Pretension T<sub>0</sub></label><input type="number" id="m-pre" step="any" min="0" value="${same && mb.pretension > 0 ? uv('force', mb.pretension) : ''}" placeholder="${same ? 'none' : '(differ)'}"><span class="unit">${unit('force')}</span></div>
-        ${pretensionNote(mbs)}`; })() : ''}
+        return `<div class="fields"><label for="m-pre" title="The force the cable is tightened to (turnbuckle, gauge) before any load: with no load on the structure it carries this. It also sets how much the cable sags under its own weight, which makes it softer (Settings ▸ Straight cables). Blank or 0: none: a straight cable, just taut.">Pretension T<sub>0</sub></label><input type="number" id="m-pre" step="any" min="0" value="${same && mb.pretension > 0 ? uv('force', mb.pretension) : ''}" placeholder="${same ? 'none' : '(differ)'}"><span class="unit">${unit('force')}</span></div>
+        ${pretensionNote(mbs)}
+        ${mbs.some(x => !steelCheckable(x).rod && !ropeOf(x)) ? '<p class="hint">For the rod check (yielding and the threads), give it a steel material and a steel rod section: Sections ▸ Shape ▸ Steel rods.</p>' : ''}`; })() : ''}
     </div>
     ${cab ? '' : (() => { // deformation constraints, as Ftool's: flexible (axial, shear) or rigid
       const ds = mbs.map(x => memberDeform(x)), all = k => ds.every(k), some = k => ds.some(k);
@@ -13481,7 +13630,7 @@ function panelSections() {
   const uses = id => m.members.filter(x => x.section === id).length;
   const props = cur ? sectionTable(cur) : '';
   return `<div class="row"><h3 style="flex:1">Sections</h3><button class="btn small" data-act="sec-add">Add section</button>${cur ? '<button class="btn small" data-act="sec-dup" title="A copy of this section, to change">Duplicate</button>' : ''}</div>
-  <div class="list">${m.sections.map(x => `<div class="item ${cur && x.id === cur.id ? 'on' : ''}" data-sec="${x.id}"><span>${esc(x.name)}</span><span class="meta">${x.cat && WOOD_KEYS.has(x.cat.type) ? 'Wood' : x.cat && SHAPE_TYPES.find(([k]) => k === x.cat.type) ? 'AISC ' + x.cat.type : SECTION_NAMES[x.type]} · ${uses(x.id)} used</span></div>`).join('') || '<p class="hint">No sections yet.</p>'}</div>
+  <div class="list">${m.sections.map(x => `<div class="item ${cur && x.id === cur.id ? 'on' : ''}" data-sec="${x.id}"><span>${esc(x.name)}</span><span class="meta">${x.cat && WOOD_KEYS.has(x.cat.type) ? 'Wood' : x.cat && ROD_KEYS.has(x.cat.type) ? 'Steel rod' : x.cat && x.cat.rope ? (x.cat.rope.family === 'A586' ? 'Structural strand' : 'Wire rope') : x.cat && SHAPE_TYPES.find(([k]) => k === x.cat.type) ? 'AISC ' + x.cat.type : SECTION_NAMES[x.type]} · ${uses(x.id)} used</span></div>`).join('') || '<p class="hint">No sections yet.</p>'}</div>
   ${cur ? `<div class="box"><div class="fields">
     <label for="sc-name">Name</label><input type="text" id="sc-name" value="${esc(cur.name)}"><span></span>
     <label for="sc-type">Shape</label>${shapeSelect(cur)}<span></span>
@@ -13546,7 +13695,9 @@ function sectionTable(sec) {
   ].filter(r => r[2]);
   const note = (sec.type === 'L2' ? '<p class="hint">A double angle bends about its horizontal axis (twice one angle); its I<sub>y</sub> depends on the gap s.</p>' : '') + (sec.type === 'L' ? '<p class="hint">An angle is bent about the axis parallel to its horizontal leg here, not its principal axis.</p>' : '')
     + (p.cat && sec.cat && WOOD_KEYS.has(sec.cat.type) ? `<p class="hint">${esc(sec.cat.us)}${sec.cat.type === 'LUM' || sec.cat.type === 'TIM' ? ` nominal is ${fsig(toU('dim', sec.dims.b))} x ${fsig(toU('dim', sec.dims.h))} ${unit('dim')} dressed (actual), the size analysed` : ': its actual size, as analysed'}. Give it a wood material (Materials tab) for its stiffness and weight.</p>` : '')
-    + (p.cat && !(sec.cat && WOOD_KEYS.has(sec.cat.type)) ? `<p class="hint">From the ${esc((window.AISC_SHAPES && AISC_SHAPES.source) || 'AISC Shapes Database')}: A, I, S, Z and J as published (with the root fillets); the analysis uses this A and I<sub>x</sub>. ȳ and the drawing are from the plates.</p>` : '');
+    + (p.cat && sec.cat && ROD_KEYS.has(sec.cat.type) ? '<p class="hint">A solid round steel bar, by its nominal diameter. Use it for a member that is a rod / cable (Tension only) with a steel material, and it gets the rod check: yielding and the threads (Design tab).</p>' : '')
+    + (p.cat && sec.cat && sec.cat.rope ? `<p class="hint">${sec.cat.rope.family === 'A586' ? 'ASTM A586 structural strand, Grade 1' : 'ASTM A603 structural wire rope'}, Class A coating: A is its metallic area; minimum breaking force ${fq('force', sec.cat.rope.mbf)} (${sec.cat.rope.tons} tons of 2000 lb), as Lexco Cable lists it. Its own E, ${fsig(toU('stress', sec.cat.rope.E))} ${unit('stress')} (prestretched), is used for the member in the analysis instead of its material's. Use it for a rod / cable (Tension only). It is not checked: compare its tension with the minimum breaking force, by the factor of safety your work calls for.</p>` : '')
+    + (p.cat && !(sec.cat && (WOOD_KEYS.has(sec.cat.type) || ROD_KEYS.has(sec.cat.type) || sec.cat.rope)) ? `<p class="hint">From the ${esc((window.AISC_SHAPES && AISC_SHAPES.source) || 'AISC Shapes Database')}: A, I, S, Z and J as published (with the root fillets); the analysis uses this A and I<sub>x</sub>. ȳ and the drawing are from the plates.</p>` : '');
   return `<table class="res sec-props">${rows.map(([k, t, v]) => `<tr title="${esc(t)}"><th>${k}</th><td>${v}</td></tr>`).join('')}</table>${note}`;
 }
 // ---------- the AISC shape table (shapes.js, made by aisc-import.js) ----------
@@ -13554,7 +13705,7 @@ function sectionTable(sec) {
 // (its dimensions and its published properties), as in Ftool's table sections.
 const SHAPE_TYPES = [['W', 'W shapes'], ['M', 'M shapes'], ['S', 'S shapes'], ['HP', 'HP shapes'], ['C', 'C channels'], ['MC', 'MC channels'],
   ['WT', 'WT tees'], ['MT', 'MT tees'], ['ST', 'ST tees'], ['L', 'Angles (L)'], ['2L', 'Double angles (2L)'], ['HSS-rect', 'HSS rectangular'], ['HSS-round', 'HSS round'], ['PIPE', 'Pipe']];
-const SHAPE_KIND = { LUM: 'rectangle', TIM: 'rectangle', GLU: 'rectangle', 'C-EU': 'rectangle', 'GL-EU': 'rectangle', W: 'I', M: 'I', S: 'I', HP: 'I', C: 'C', MC: 'C', WT: 'T', MT: 'T', ST: 'T', L: 'L', '2L': 'L2', 'HSS-rect': 'box', 'HSS-round': 'ring', PIPE: 'ring' };
+const SHAPE_KIND = { ROD: 'circle', 'ROPE-A586': 'generic', 'ROPE-A603': 'generic', LUM: 'rectangle', TIM: 'rectangle', GLU: 'rectangle', 'C-EU': 'rectangle', 'GL-EU': 'rectangle', W: 'I', M: 'I', S: 'I', HP: 'I', C: 'C', MC: 'C', WT: 'T', MT: 'T', ST: 'T', L: 'L', '2L': 'L2', 'HSS-rect': 'box', 'HSS-round': 'ring', PIPE: 'ring' };
 // Wood: dressed (actual) sizes of sawn lumber and timbers from their nominal sizes (the US rule: 2 to 4 in thick, 1/2 in
 // off the thickness and off widths to 6 in, 3/4 in off widths of 8 in and more; timbers 5 in and thicker, 1/2 in off
 // each), US glulam in 1-1/2 in lams, and common European sizes. Rows as AISC's: [US name, metric name, [b, h] mm,
@@ -13580,12 +13731,42 @@ function woodShapes() {
   for (const w of [90, 115, 140, 165, 190, 215]) for (let h = 180; h <= 1215; h += 45) if (h >= 1.5 * w) T['GL-EU'].push(row(`${w}x${h}`, `${w}x${h}`, w, h));
   return (woodRows = T);
 }
-// every table the Shape list offers: AISC's (when shapes.js holds it) and the wood sizes
-const shapeTable = () => ({ ...((window.AISC_SHAPES && AISC_SHAPES.types) || {}), ...woodShapes() });
+// Steel rods: solid round bars by their nominal diameter, the area the rod check uses for yielding and the threads
+// (AISC's Ab). US sizes 1/2 to 2 in, then metric M12 to M36. Rows as the others' (one name: the rod's own).
+const ROD_TYPES = [['ROD', 'Steel rods (round bars)']];
+const ROD_KEYS = new Set(ROD_TYPES.map(([k]) => k));
+let rodRows = null;
+function rodShapes() {
+  if (rodRows) return rodRows;
+  const row = (name, d) => { const A = Math.PI * d * d / 4, I = Math.PI * d ** 4 / 64; return [name, null, [d], A, I, d ** 3 / 6, I / (d / 2), I, 2 * I, null]; };
+  const us = [['1/2', 0.5], ['5/8', 0.625], ['3/4', 0.75], ['7/8', 0.875], ['1', 1], ['1-1/8', 1.125], ['1-1/4', 1.25], ['1-3/8', 1.375], ['1-1/2', 1.5], ['1-3/4', 1.75], ['2', 2]];
+  return (rodRows = { ROD: [...us.map(([n, d]) => row(`${n} in rod`, d * 25.4)), ...[12, 16, 20, 24, 27, 30, 36].map(d => row(`M${d} rod`, d))] });
+}
+// Structural strand and wire rope (ASTM A586, A603), by nominal diameter, from design.js's tables. Each is a generic
+// section: its metallic area, the I of a solid round bar of that area (a cable never bends, so it is not used) and
+// its diameter as h; with cat.rope { family, E (MPa), mbf (kN), tons, d }: its own E, which the analysis uses for the
+// member instead of its material's, and its minimum breaking force, for the check.
+const ROPE_TYPES = [['ROPE-A586', 'Structural strand (ASTM A586)'], ['ROPE-A603', 'Structural wire rope (ASTM A603)']];
+const ROPE_KEYS = new Set(ROPE_TYPES.map(([k]) => k));
+let ropeRows = null;
+function ropeShapes() {
+  if (ropeRows) return ropeRows;
+  const T = {};
+  for (const fam of ['A586', 'A603']) T['ROPE-' + fam] = Design.ROPES[fam].rows.map(r => {
+    const x = Design.ropeRow(fam, r), I = x.A * x.A / (4 * Math.PI);
+    return [x.name, null, [x.d, x.A, I], x.A, I, null, null, I, null, null, { family: fam, E: x.E, mbf: x.mbf, tons: x.tons, d: x.d }];
+  });
+  return (ropeRows = T);
+}
+// the wire rope or strand section of a member, or null
+const ropeOf = (mb, m = st.model) => { const s = m.sections.find(x => x.id === mb.section); return s && s.cat && s.cat.rope ? s : null; };
+// every table the Shape list offers: AISC's (when shapes.js holds it), the wood sizes, the steel rods and the ropes
+const shapeTable = () => ({ ...((window.AISC_SHAPES && AISC_SHAPES.types) || {}), ...woodShapes(), ...rodShapes(), ...ropeShapes() });
 const shapeLabel = row => (st.units === 'US' || !row[1] ? row[0] : row[1]);
 // the nominal size a shape is listed under: W14X90 -> 14, L8X6X1 -> 8X6, HSS12X8X5/8 -> 12X8
 function shapeSize(type, row) {
   const lab = shapeLabel(row);
+  if (ROD_KEYS.has(type) || ROPE_KEYS.has(type)) return 'all'; // rods and ropes: one list, by diameter (no Size to pick first)
   if (WOOD_KEYS.has(type)) return lab.split('x')[0]; // wood: by thickness or width (2x10 -> 2, 5-1/8x12 -> 5-1/8)
   if (type === 'PIPE') return (/\d+(\.\d+)?/.exec(lab) || [lab])[0];
   const parts = lab.replace(/^2?[A-Za-z]+/, '').split(/X/i);
@@ -13596,8 +13777,8 @@ function shapeSelect(sec) {
   const T = shapeTable(), cur = sec.cat && T && T[sec.cat.type] ? 'tbl:' + sec.cat.type : sec.type;
   const own = Object.keys(SECTION_FIELDS).map(k => opt(k, SECTION_NAMES[k], cur)).join('');
   const aisc = window.AISC_SHAPES ? SHAPE_TYPES.filter(([k]) => T[k] && T[k].length).map(([k, l]) => opt('tbl:' + k, l, cur)).join('') : '';
-  const wood = WOOD_TYPES.map(([k, l]) => opt('tbl:' + k, l, cur)).join('');
-  return `<select id="sc-type"><optgroup label="Your own dimensions">${own}</optgroup>${aisc ? `<optgroup label="${esc(AISC_SHAPES.source || 'AISC table')}">${aisc}</optgroup>` : ''}<optgroup label="Wood (dressed sizes)">${wood}</optgroup></select>`;
+  const wood = WOOD_TYPES.map(([k, l]) => opt('tbl:' + k, l, cur)).join(''), rods = ROD_TYPES.map(([k, l]) => opt('tbl:' + k, l, cur)).join(''), ropes = ROPE_TYPES.map(([k, l]) => opt('tbl:' + k, l, cur)).join('');
+  return `<select id="sc-type"><optgroup label="Your own dimensions">${own}</optgroup>${aisc ? `<optgroup label="${esc(AISC_SHAPES.source || 'AISC table')}">${aisc}</optgroup>` : ''}<optgroup label="Steel rods">${rods}</optgroup><optgroup label="Wire rope / strand">${ropes}</optgroup><optgroup label="Wood (dressed sizes)">${wood}</optgroup></select>`;
 }
 // for a section from the table: its nominal size, and the shapes of that size (◂ ▸ step through them all)
 function shapeTableBox(sec) {
@@ -13606,8 +13787,8 @@ function shapeTableBox(sec) {
   const type = sec.cat.type, rows = T[type], sizes = [...new Set(rows.map(r => shapeSize(type, r)))];
   const curRow = rows.find(r => r[0] === sec.cat.us) || rows[0], size = shapeSize(type, curRow);
   const inSize = rows.filter(r => shapeSize(type, r) === size);
-  return `<div class="shape-table fields" title="${WOOD_KEYS.has(type) ? 'Dressed (actual) wood sizes' : 'Shapes from the ' + esc((window.AISC_SHAPES && AISC_SHAPES.source) || 'AISC Shapes Database')}">
-    <label for="tb-size">Size</label><select id="tb-size">${sizes.map(z => opt(z, z, size)).join('')}</select><span></span>
+  return `<div class="shape-table fields" title="${WOOD_KEYS.has(type) ? 'Dressed (actual) wood sizes' : ROD_KEYS.has(type) ? 'Solid round steel bars, by nominal diameter' : ROPE_KEYS.has(type) ? 'By nominal diameter: metallic area, minimum breaking force (Class A coating) and E' : 'Shapes from the ' + esc((window.AISC_SHAPES && AISC_SHAPES.source) || 'AISC Shapes Database')}">
+    ${sizes.length > 1 || !(ROD_KEYS.has(type) || ROPE_KEYS.has(type)) ? `<label for="tb-size">Size</label><select id="tb-size">${sizes.map(z => opt(z, z, size)).join('')}</select><span></span>` : ''}
     <label for="tb-shape">Table shape</label><div class="row tb-pick"><button class="btn small" data-act="tb-step" data-step="-1" aria-label="Previous shape" title="The previous shape in the table">◂</button><select id="tb-shape">${inSize.map(r => opt(r[0], shapeLabel(r), curRow[0])).join('')}</select><button class="btn small" data-act="tb-step" data-step="1" aria-label="Next shape" title="The next shape in the table">▸</button></div><span></span>
   </div>`;
 }
@@ -13622,9 +13803,10 @@ function nearestShape(sec, type) {
 // make section sec the table's shape: type key and its row
 function useShape(sec, type, row) {
   const k = SHAPE_KIND[type], d = row[2];
-  const dims = k === 'rectangle' ? { b: d[0], h: d[1] } : k === 'L' ? { d: d[0], b: d[1], t: d[2] } : k === 'L2' ? { d: d[0], b: d[1], t: d[2], s: d[3] } : k === 'box' ? { b: d[0], h: d[1], t: d[2] } : k === 'ring' ? { d: d[0], t: d[1] } : { d: d[0], b: d[1], tw: d[2], tf: d[3] };
+  const dims = k === 'generic' ? { A: d[1], I: d[2], h: d[0] } : k === 'circle' ? { d: d[0] } : k === 'rectangle' ? { b: d[0], h: d[1] } : k === 'L' ? { d: d[0], b: d[1], t: d[2] } : k === 'L2' ? { d: d[0], b: d[1], t: d[2], s: d[3] } : k === 'box' ? { b: d[0], h: d[1], t: d[2] } : k === 'ring' ? { d: d[0], t: d[1] } : { d: d[0], b: d[1], tw: d[2], tf: d[3] };
   sec.type = k; sec.dims = dims; sec.name = shapeLabel(row);
   sec.cat = { type, us: row[0], A: row[3], Ix: row[4], Zx: row[5], Sx: row[6], Iy: row[7], J: row[8] };
+  if (row[10]) sec.cat.rope = { ...row[10] }; // a wire rope or strand: its E and minimum breaking force
 }
 function shapeStep(sec, step) {
   const T = shapeTable(); if (!T) return;
@@ -13909,7 +14091,9 @@ function woodTime(key, method, m = st.model) {
 const woodWet = (m = st.model) => !!(m.design && m.design.wet);
 // the check a member gets: steel (AISC 360) or wood (NDS), or why it gets none
 function memberCheckable(mb, m = st.model) {
-  const mat = m.materials.find(x => x.id === mb.material);
+  const mat = m.materials.find(x => x.id === mb.material), rs = ropeOf(mb, m);
+  // a wire rope or strand: no check (the factor on its breaking force depends on the work: building, falsework, rigging)
+  if (rs) return { why: ropeWhy(rs) };
   if (mat && mat.kind === 'wood') { const c = woodCheckable(mb, m); return c.why ? c : { ...c, wood: true }; }
   if (mat && mat.kind !== 'steel') return { why: `${mat.name} is ${mat.kind}: steel and wood members are checked` };
   return steelCheckable(mb, m);
@@ -13934,6 +14118,8 @@ function checkRuns(m = st.model) {
   for (const g of gen) runs.push({ key: g.terms.map(t => [t.case, t.factor]), name: g.name });
   return { runs, kind: 'load cases', nCases: m.cases.length, gen: gen.length };
 }
+// why a wire rope or strand is not checked, with its minimum breaking force to check its tension against
+const ropeWhy = sec => `${sec.name} is wire rope or strand, which TrussFrame does not check: compare its tension with its minimum breaking force, ${fq('force', sec.cat.rope.mbf)}, by the factor of safety and fitting efficiency the work calls for`;
 function steelChecks() {
   if (st.checkCache) return st.checkCache;
   const m = st.model, method = steelMethod(m), { runs, kind } = checkRuns(m), members = new Map(), failed = [];
@@ -14158,10 +14344,11 @@ function panelDesign() {
   const mbs = [...st.sel.members].map(memberById).filter(Boolean);
   const big = !st.checkCache && st.model.members.length >= BACKGROUND_FROM;
   const isWood = mb => { const mat = st.model.materials.find(x => x.id === mb.material); return !!mat && mat.kind === 'wood'; };
-  const isRod = mb => !isWood(mb) && !!steelCheckable(mb).rod, rods = mbs.filter(isRod), steels = mbs.filter(x => !isWood(x) && !isRod(x));
+  const isRope = mb => !!ropeOf(mb), isRod = mb => !isWood(mb) && !isRope(mb) && !!steelCheckable(mb).rod;
+  const ropes = mbs.filter(isRope), rods = mbs.filter(isRod), steels = mbs.filter(x => !isWood(x) && !isRope(x) && !isRod(x));
   const askNow = name => `<div class="row"><h3 style="flex:1">${name}</h3><button class="btn small" data-act="steel-run">Check now</button></div><p class="hint">On a model this large every member is checked when asked.</p>`;
   return `<h3>Design checks</h3>
-    ${mbs.length ? (mbs.some(isWood) ? woodBox(mbs.filter(isWood)) : '') + (rods.length ? rodBox(rods) : '') + (steels.length ? steelBox(steels) : '') : '<p class="hint">Select a member (or several) to set its unbraced lengths and factors for the steel or wood check, or a rod\'s grade, and to see its ratio.</p>'}
+    ${mbs.length ? (mbs.some(x => isWood(x) && !isRope(x)) ? woodBox(mbs.filter(x => isWood(x) && !isRope(x))) : '') + (ropes.length ? ropeBox(ropes) : '') + (rods.length ? rodBox(rods) : '') + (steels.length ? steelBox(steels) : '') : '<p class="hint">Select a member (or several) to set its unbraced lengths and factors for the steel or wood check, or a rod\'s grade, and to see its ratio.</p>'}
     <div class="box">${big ? askNow('Steel check') : steelResultsPanel(true)}
       <p class="hint">The Check view at the top colours each member by its ratio.</p></div>
     <div class="box">${big ? askNow('Wood check (NDS 2018)') : woodResultsPanel()}
@@ -14297,6 +14484,13 @@ function rodWorking(mb, sc) {
     : 'Upset ends, or no threads: any threads are on a larger diameter, made stronger than the body, so yielding governs. Set Ends to Threaded (Design tab) for a plain threaded rod.'}</div>
   <h3>Under ${esc(c.run)}</h3>
   <div class="eqs">Tension T = ${F(r.worst.N)} → T / ${F(r.cap)} = <b>${r.ratio.toFixed(3)}</b></div>`;
+}
+// the box in the Design tab for the selected wire ropes and strands: not checked, and what to check them against
+function ropeBox(mbs) {
+  const secs = [...new Set(mbs.map(x => ropeOf(x)))];
+  return `<div class="box"><h3>Wire rope or strand</h3>
+    <p class="hint">Not checked: the factor of safety on a wire rope's breaking force depends on the work (a building, falsework, rigging), so compare each cable's tension (Results) with its minimum breaking force, by the factor and fitting efficiency your rules give. ${secs.map(sec => `${esc(sec.name)}: minimum breaking force ${fq('force', sec.cat.rope.mbf)} (${sec.cat.rope.tons} t).`).join(' ')}</p>
+  </div>`;
 }
 // what the rod check covers, under the working
 const rodCovers = sc => `<h3>What the rod check covers</h3>
@@ -14664,11 +14858,12 @@ function panelResults() {
   <p class="hint">N, V in ${uF}; M in ${uM}.</p>
   ${R.slack && R.slack.length ? `<p class="hint">Slack: ${R.slack.length === 1 ? 'member' : 'members'} ${R.slack.join(', ')}, ${R.slack.length === 1 ? 'a cable' : 'cables'} these loads would push, so ${R.slack.length === 1 ? 'it carries' : 'they carry'} nothing (dashed on the drawing).</p>` : ''}
   ${R.pretension ? `<p class="hint">Pretension (with no load): ${R.pretension.ids.map((id, k) => `member ${id} ${fq('force', R.pretension.asked[k])}`).join(', ')}. These results include it.</p>${pretensionNote(R.pretension.short.map(memberById).filter(Boolean))}` : ''}
+  ${(() => { const sg = (R.members || []).filter(x => x.sag); return sg.length ? `<p class="hint">Sag under their own weight (Settings ▸ Straight cables is off): ${sg.map(x => `member ${x.id} ${sagWords(x.sag)}`).join('; ')}.</p>` : ''; })()}
   <h3>Reactions</h3><div class="tablewrap"><table class="res"><tr><th>Node</th><th>Rx ${uF}</th><th>Ry ${uF}</th><th>M ${uM}</th></tr>${reac}
   <tr><td>Sum</td><td>${F(sum[0])}</td><td>${F(sum[1])}</td><td></td></tr></table></div>
   <h3>Node displacements</h3><div class="tablewrap"><table class="res"><tr><th>Node</th><th>ux ${uD}</th><th>uy ${uD}</th><th>rz rad</th></tr>${disp}</table></div>
   <div class="row"><button class="btn small" data-act="show-steps">Show step-by-step solution</button></div>
-  <p class="hint">Hover a member in the N, V, M or Deformed view to read values at any point. Results are first-order linear elastic, ${deformSummary() || 'Euler-Bernoulli members (no shear deformation) that stretch and shorten under axial force'}.${deformSummary() ? ' Each member\'s deformation is in Properties ▸ Deformation.' : ''}${R.cableRounds ? ` The cables (tension only) were found taut or slack in ${R.cableRounds} round${R.cableRounds === 1 ? '' : 's'} of analysis.` : ''}</p>`;
+  <p class="hint">Hover a member in the N, V, M or Deformed view to read values at any point. Results are first-order linear elastic, ${deformSummary() || 'Euler-Bernoulli members (no shear deformation) that stretch and shorten under axial force'}.${deformSummary() ? ' Each member\'s deformation is in Properties ▸ Deformation.' : ''}${R.cableRounds ? ` The cables (tension only) were found taut or slack${R.sagRounds ? ', with their sag,' : ''} in ${R.cableRounds} round${R.cableRounds === 1 ? '' : 's'} of analysis.` : ''}</p>`;
 }
 // envelope tables: per member the max / min of N, V, M with the governing run, then reactions
 function envelopeTablesHTML(R, wrapCls, tableCls) {
@@ -15124,6 +15319,7 @@ function exportFtl() {
   const caseIdx = m.cases.map(c => c.id);
   if (m.members.some(mb => mb.tensionOnly)) notes.push('Cables (tension only) are written as members pinned at both ends: the file has no tension-only setting, so Ftool takes them as ordinary truss bars, which can push too.');
   if (m.members.some(mb => mb.tensionOnly && mb.pretension > 0)) notes.push('Pretension is not written: Ftool has no such setting.');
+  if (m.sections.some(x => x.cat && x.cat.rope)) notes.push('Wire rope and strand sections are written with their area and inertia, but not their own E: Ftool takes the material\'s.');
   m.members.forEach((mb, k) => {
     const blk = fr.member(k), rev = fr.memberStartsAt(k) !== nIdx.get(mb.i);
     blk.material = mb.material ? m.materials.findIndex(x => x.id === mb.material) + 1 : 0;
@@ -15216,10 +15412,11 @@ function cableStepsNote(r) {
   const sl = r.slack || [], one = sl.length === 1, list = ids => (ids.length === 1 ? `member ${ids[0]}` : `members ${ids.join(', ')}`);
   const kept = r.trace && r.trace.elems.some(el => el.slack && el.A > 0);
   return `<p><b>Cables.</b> ${list(cables)} ${cables.length === 1 ? 'is a cable' : 'are cables'} (tension only): pinned at both ends, ${cables.length === 1 ? 'it pulls' : 'they pull'} but cannot push.
-  Which ones are slack depends on the loads, so the analysis was repeated (${r.cableRounds} round${r.cableRounds === 1 ? '' : 's'}): every cable starts taut, one in compression goes slack, and a slack one whose ends move apart is taut again, until nothing changes.
+  Which ones are slack depends on the loads, so the analysis was repeated (${r.cableRounds} round${r.cableRounds === 1 ? '' : 's'}${r.sagRounds ? `, in ${r.sagRounds} passes for the sag` : ''}): every cable starts taut, one in compression goes slack, and a slack one whose ends move apart is taut again, until nothing changes.
   ${sl.length ? `Under these loads ${list(sl)} ${one ? 'is' : 'are'} slack and carr${one ? 'ies' : 'y'} nothing: ${kept ? `${one ? 'it is' : 'they are'} kept below with a tiny stiffness (a hundred-millionth of a typical member's EA/L), since without ${one ? 'it' : 'them'} the structure could swing in a direction no load pushes it` : `${one ? 'it is' : 'they are'} left out of the matrices below (no stiffness)`}.` : 'Under these loads every cable is taut.'}
   The matrices are those of the last analysis.${activeHasSW() ? ' A cable\'s own weight is in the nodal loads, half at each end.' : ''}
-  ${r.pretension ? `${list(r.pretension.ids).replace(/^m/, 'M')} ${r.pretension.ids.length === 1 ? 'is' : 'are'} pretensioned (${r.pretension.ids.map((id, k) => fq('force', r.pretension.asked[k])).join(', ')} with no load${r.pretension.short.length ? `; ${list(r.pretension.short)} cannot get ${r.pretension.short.length === 1 ? 'its' : 'theirs'}: see Properties` : ''}): each is made shorter than its nodes are apart by as much as gives that force once the structure has given way to the pull, worked out once for the structure. That shortening is in the fixed-end forces below, ±EA·e/L, as a temperature change would be${sl.some(id => r.pretension.ids.includes(id)) ? ' (not for a slack one: it has lost its pretension)' : ''}.` : ''}</p>`;
+  ${r.pretension ? `${list(r.pretension.ids).replace(/^m/, 'M')} ${r.pretension.ids.length === 1 ? 'is' : 'are'} pretensioned (${r.pretension.ids.map((id, k) => fq('force', r.pretension.asked[k])).join(', ')} with no load${r.pretension.short.length ? `; ${list(r.pretension.short)} cannot get ${r.pretension.short.length === 1 ? 'its' : 'theirs'}: see Properties` : ''}): each is made shorter than its nodes are apart by as much as gives that force once the structure has given way to the pull, worked out once for the structure. That shortening is in the fixed-end forces below, ±EA·e/L, as a temperature change would be${sl.some(id => r.pretension.ids.includes(id)) ? ' (not for a slack one: it has lost its pretension)' : ''}.` : ''}
+  ${(() => { const sg = r.members.filter(x => x.sag).map(x => x.id); return sg.length ? `${list(sg).replace(/^m/, 'M')} also sag${sg.length === 1 ? 's' : ''} under ${sg.length === 1 ? 'its' : 'their'} own weight (Settings ▸ Straight cables is off), which makes ${sg.length === 1 ? 'it' : 'them'} softer the less tight ${sg.length === 1 ? 'it is' : 'they are'}: see ${sg.length === 1 ? 'it' : 'each'} below.` : ''; })()}</p>`;
 }
 
 function stepsHTML() {
@@ -15275,6 +15472,13 @@ function stepsHTML() {
     ${e.Phi > 0 ? `<p class="hint">Shear deformation included (Timoshenko): G = ${fmtMx(e.G * F / Lf ** 2, 0)} ${fu}/${lu}², shear area As = ${fmtMx(e.As * Lf ** 2, 0)} ${lu}², Φ = 12EI/(G·As·L²) = ${fmtMx(e.Phi, 1e-12)}.
       The bending terms above become 12EI/(L³(1+Φ)), 6EI/(L²(1+Φ)), (4+Φ)EI/(L(1+Φ)) and (2−Φ)EI/(L(1+Φ)); k′ below uses them.</p>` : ''}
     ${e.rigid ? `<p class="hint">Rigid member (Properties ▸ Deformation): A and I above are 10 000 times the section's (A = ${fmtMx(e.A0 * Lf ** 2, 0)} ${lu}², I = ${fmtMx(e.I0 * Lf ** 4, 0)} ${lu}⁴), so it neither bends nor stretches; its forces still come out.</p>` : e.axialOn === false ? `<p class="hint">No axial deformation (axially rigid): A above is 10 000 times the section's (${fmtMx(e.A0 * Lf ** 2, 0)} ${lu}²), so the member does not stretch or shorten.</p>` : ''}
+    ${e.kt > 0 ? (() => { // a sagging cable: what its A above stands for
+      const sg = (r.members.find(x => x.id === mb.id) || {}).sag;
+      if (!sg) return '';
+      return `<p class="hint">Sagging cable: it hangs under its own weight, w·cos α = ${fmtMx(sg.w * F / Lf, 1e-12)} ${fu}/${lu} across it, so pulling it first straightens it and then stretches it.
+        At its tension under these loads, T = ${fmtMx(sg.T * F, 1e-12)} ${fu}, its stiffness is EA/L ÷ (1 + (w·L·cos α)²·EA/(12·T³)) = ${fmtMx(sg.k * F / Lf, 0)} ${fu}/${lu}${sg.deep ? ' (its sag is past an eighth of its length, where the formula stops: the stiffness at that point)' : ''}, ${fmtMx(100 * sg.k / sg.kEA, 0)}% of its straight EA/L (${fmtMx(sg.kEA * F / Lf, 0)} ${fu}/${lu}).
+        A above is the area that gives that stiffness; the section's own is ${fmtMx(e.A0 * Lf ** 2, 0)} ${lu}². The tension comes from repeating the analysis, each time with the stiffness at the last one's tension (${r.sagRounds} round${r.sagRounds === 1 ? '' : 's'}).</p>`;
+    })() : ''}
     <h4>Local stiffness k′</h4>${mxHTML(LOC, LOC, k0)}
     ${hinges ? `<h4>k′ after releasing the hinge (static condensation)</h4>
       <p class="hint">A hinge means the end moment is zero, so that end's rotation is removed from the member: k′c = k′ − k′ᵣ k′ᵣᵣ⁻¹ k′ᵣᵀ, where r is the released rotation.</p>${mxHTML(LOC, LOC, kp)}` : ''}
@@ -15388,7 +15592,8 @@ function loadDescription(e, F, Lf) {
   if (p1 || p2) parts.push(p1 === p2 ? `axial load p′ = ${q(p1)}` : `axial load p′ from ${q(p1)} to ${q(p2)}`);
   if (tTop || tBot) parts.push(`temperature change top ${fqNum('temp', tTop)} / bottom ${fq('temp', tBot)}`);
   const U = stepUnits(), fl = v => fmtMx(v * Lf, 1e-12), ff = v => fmtMx(v * F, 1e-12);
-  if (e.Npre) parts.push(`pretension: the cable is made e = ${fl(e.pre)} ${U.lu} shorter than its nodes are apart, so held at their distance it pulls N₀ = EA·e/L = ${ff(e.Npre)} ${U.fu}, and f′₀ = [−N₀, 0, 0, +N₀, 0, 0]`);
+  if (e.Npre && e.kt > 0) parts.push(`sag: the sagging cable is taken as the straight one that touches its curve of force against stretch at its tension (stiffness EA/L with the A above), which pulls N₀ = ${ff(e.Npre)} ${U.fu} with its ends where they are drawn, and f′₀ = [−N₀, 0, 0, +N₀, 0, 0]`);
+  else if (e.Npre) parts.push(`pretension: the cable is made e = ${fl(e.pre)} ${U.lu} shorter than its nodes are apart, so held at their distance it pulls N₀ = EA·e/L = ${ff(e.Npre)} ${U.fu}, and f′₀ = [−N₀, 0, 0, +N₀, 0, 0]`);
   // a cable takes no load along it (its own weight is at its end nodes): its pretension is all there is here
   if (e.cable) return 'Member load in local axes: ' + parts.join('; ') + '.';
   for (const p of e.ld.points || []) parts.push(`point load at a = ${fl(p.a)} ${U.lu}: P′x = ${ff(p.px)}, P′y = ${ff(p.py)} ${U.fu}${p.m ? `, M = ${fmtMx(p.m * F * Lf, 1e-12)} ${U.fu}·${U.lu}` : ''}`);
@@ -15436,7 +15641,7 @@ function handTruss(m) {
   const sm = solverModel(m), factors = factorsFor(st.activeCase), loads = nodeLoadsOf(m);
   if (!m.members.some(mb => mb.tensionOnly)) return { sm, factors, loads, slack: [], error: null };
   let slack = [];
-  try { slack = FrameSolver.analyze({ ...sm, members: sm.members.map(mb => ({ ...mb, hingeI: true, hingeJ: true })) }, loads, factors, { caseNames: caseNamesOf(m) }).slack; } catch (e) { return { sm, factors, loads, slack, error: e.message }; }
+  try { slack = FrameSolver.analyze({ ...sm, members: sm.members.map(mb => ({ ...mb, hingeI: true, hingeJ: true })) }, loads, factors, { cableSag: !m.cableStraight, caseNames: caseNamesOf(m) }).slack; } catch (e) { return { sm, factors, loads, slack, error: e.message }; }
   const out = new Set(slack), members = sm.members.filter(mb => !out.has(mb.id)), used = new Set(members.flatMap(mb => [mb.i, mb.j]));
   return { sm: { ...sm, members, nodes: sm.nodes.filter(n => used.has(n.id)) }, factors, loads, slack, error: null };
 }
@@ -17429,7 +17634,7 @@ function reportHTML() {
   const date = new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
   const o = reportOpts(), on = k => o.parts[k] !== false, runOn = key => !o.skip.includes(String(key));
   let h = `<h1>${esc(m.title || 'TrussFrame model')}</h1>
-  <p class="meta">TrussFrame · 2D frame analysis report · ${esc(date)}<br>Units: ${unitSummary(', ')} · First-order linear-elastic analysis (direct stiffness method), ${deformSummary() || 'Euler-Bernoulli members with axial deformation'}${hasCables() ? `; cables (tension only) by repeated analysis, each load case and combination on its own, until every cable is taut or slack${st.model.members.some(mb => mb.tensionOnly && mb.pretension > 0) ? ', with their pretension in every analysis' : ''}` : ''}</p>`;
+  <p class="meta">TrussFrame · 2D frame analysis report · ${esc(date)}<br>Units: ${unitSummary(', ')} · First-order linear-elastic analysis (direct stiffness method), ${deformSummary() || 'Euler-Bernoulli members with axial deformation'}${hasCables() ? `; cables (tension only) by repeated analysis, each load case and combination on its own, until every cable is taut or slack${st.model.members.some(mb => mb.tensionOnly && mb.pretension > 0) ? `, with their pretension in every analysis${m.cableStraight ? '' : ' and the sag of the pretensioned ones under their own weight (Ernst\'s formula, at the tension each has)'}` : ''}` : ''}</p>`;
   if (['drawing', 'nodes', 'members', 'materials', 'sections', 'combos'].some(on)) h += '<h2>Model</h2>';
   // drawings in the Model view style, or with the Custom view's layers (falls back to Model when a case cannot be analysed)
   const useCustom = o.drawStyle === 'custom', layerNames = () => LAYERS.filter(([k]) => customLayers()[k]).map(([, l]) => l).join(', ') || 'nothing ticked';
@@ -17759,6 +17964,7 @@ function settingsHTML() {
     <p class="hint">The deformation members have unless one says otherwise in Properties ▸ Deformation.</p>
     ${chk('data-set-model="shearDef"', !!m.shearDef, 'Shear deformation (Timoshenko members)', 'Adds shear deflection V/(G·As). Off: Euler-Bernoulli, which matches hand calculations.')}
     ${chk('data-set-model="axialRigid"', !!m.axialRigid, 'Axially rigid members (no axial deformation)', 'Members cannot stretch or shorten, as hand methods assume (slope-deflection, moment distribution, frame formulas). Bending is unchanged. A uniform temperature change in a member held at both ends then gives very large forces.')}
+    ${chk('data-set-model="cableStraight"', !!m.cableStraight, 'Straight cables (no sag)', 'Off: a pretensioned cable sags under its own weight, which makes it softer the less tight it is (Ernst\'s formula, at the tension it has under each load). On: every cable is a straight bar, as most frame programs take it.')}
     <h3>Touch screen <span class="hint">(this browser)</span></h3>
     ${chk('data-set-pref="vibrate"', p.vibrate, 'Vibrate on button presses and snaps', 'A short buzz for each button pressed and when a finger catches a node, a member or a grid line')}
     ${chk('data-set-pref="numpad"', p.numpad, 'Number pad for number boxes', 'Off: the phone\'s own keyboard')}
@@ -17780,6 +17986,7 @@ $('#settings-body').addEventListener('change', e => {
     const mk = t.dataset.setModel;
     commit(() => { if (on) st.model[mk] = true; else delete st.model[mk]; });
     if (mk === 'shearDef') flash(on ? 'Shear deformation is now the default: members are Timoshenko beams unless they say otherwise (deflections grow most on short, deep members).' : 'Shear deformation off by default: Euler-Bernoulli members, as in hand calculations, unless a member says otherwise.');
+    if (mk === 'cableStraight') flash(on ? 'Cables are straight bars now: their sag is left out, as most frame programs do.' : 'Pretensioned cables sag under their own weight again, which makes them softer the less tight they are.');
     if (mk === 'axialRigid') flash(on ? 'Members are axially rigid by default: they do not stretch or shorten, as hand calculations assume, unless a member says otherwise.' : 'Members stretch and shorten under axial force by default, unless a member says otherwise.');
     renderPanel(); render();
   } else if (t.dataset.setPref) setAppPref(t.dataset.setPref, on);
